@@ -215,7 +215,9 @@ class JikanService {
       );
 
       final homeData = HomeData(
-        seasonAnimes: _parseAnimeList(batch1[0]),
+        seasonAnimes: _parseAnimeList(batch1[0]).isNotEmpty
+            ? _parseAnimeList(batch1[0])
+            : _parseAnimeList(batch1[1]),
         topAnimes: _parseAnimeList(batch1[1]),
         actionAnimes: _parseAnimeList(batch1[2]),
         romanceAnimes: _parseAnimeList(batch2[0]),
