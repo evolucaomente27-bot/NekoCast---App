@@ -596,11 +596,19 @@ class JikanService {
     int page = 1,
     int limit = 20,
   }) async {
+    final normalizedQuery = query.trim();
+    if (normalizedQuery.isEmpty) return [];
+
+    final cacheKey = 'search_${normalizedQuery.toLowerCase()}_${page}_$limit';
+    final cached = _getFromCache(cacheKey);
+    if (cached != null) return cached;
+
     try {
       await _waitForRateLimit();
       final response = await http.get(
         Uri.parse(
-          '$baseUrl/anime?q=${Uri.encodeComponent(query)}&page=$page&limit=$limit',
+          '$baseUrl/anime?q=${Uri.encodeQueryComponent(normalizedQuery)}'
+          '&page=$page&limit=$limit&order_by=score&sort=desc',
         ),
       );
 
@@ -610,6 +618,7 @@ class JikanService {
           jsonData,
           (json) => JikanAnime.fromJson(json),
         );
+        _saveToCache(cacheKey, jikanResponse.data);
         return jikanResponse.data;
       } else {
         throw Exception('Failed to search animes: ${response.statusCode}');

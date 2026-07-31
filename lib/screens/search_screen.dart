@@ -36,6 +36,7 @@ class _SearchScreenState extends State<SearchScreen>
   bool _isLoadingTrending = true;
   bool _isSearching = false;
   bool _showHistory = true;
+  int _searchRequestId = 0;
 
   // Filtros
   int? _selectedGenre;
@@ -161,7 +162,10 @@ class _SearchScreenState extends State<SearchScreen>
   Future<void> _loadTrendingAnimes() async {
     setState(() => _isLoadingTrending = true);
     try {
-      final animes = await _jikanService.getCurrentSeasonAnimes(limit: 12);
+      var animes = await _jikanService.getCurrentSeasonAnimes(limit: 12);
+      if (animes.isEmpty) {
+        animes = await _jikanService.getTopAnimes(limit: 12);
+      }
       if (mounted) {
         setState(() {
           _trendingAnimes = animes;
@@ -200,7 +204,10 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Future<void> _performSearch(String query) async {
-    if (query.isEmpty) return;
+    final normalizedQuery = query.trim();
+    if (normalizedQuery.isEmpty) return;
+
+    final requestId = ++_searchRequestId;
 
     setState(() => _isSearching = true);
 
@@ -209,16 +216,16 @@ class _SearchScreenState extends State<SearchScreen>
 
       if (_selectedGenre != null) {
         // Busca por gênero com termo
-        results = await _jikanService.searchAnimes(query, limit: 20);
+        results = await _jikanService.searchAnimes(normalizedQuery, limit: 20);
         results = results.where((anime) {
           return anime.genres.any((genre) => genre.malId == _selectedGenre);
         }).toList();
       } else {
         // Busca normal
-        results = await _jikanService.searchAnimes(query, limit: 20);
+        results = await _jikanService.searchAnimes(normalizedQuery, limit: 20);
       }
 
-      if (mounted) {
+      if (mounted && requestId == _searchRequestId) {
         setState(() {
           _searchResults = results;
           _isSearching = false;
@@ -226,7 +233,9 @@ class _SearchScreenState extends State<SearchScreen>
       }
     } catch (e) {
       debugPrint('Error searching animes: $e');
-      if (mounted) setState(() => _isSearching = false);
+      if (mounted && requestId == _searchRequestId) {
+        setState(() => _isSearching = false);
+      }
     }
   }
 
@@ -639,7 +648,7 @@ class _SearchScreenState extends State<SearchScreen>
               child: Stack(
                 children: [
                   CachedNetworkImage(
-                    imageUrl: anime.imageUrl,
+                    imageUrl: anime.largImageUrl ?? anime.imageUrl,
                     width: 130,
                     height: 160,
                     fit: BoxFit.cover,
@@ -649,6 +658,13 @@ class _SearchScreenState extends State<SearchScreen>
                         child: CircularProgressIndicator(
                           color: AppColors.primary,
                         ),
+                      ),
+                    ),
+                    errorWidget: (context, url, error) => Container(
+                      color: AppColors.surface,
+                      child: const Icon(
+                        Icons.image_not_supported_outlined,
+                        color: Colors.white54,
                       ),
                     ),
                   ),
@@ -718,7 +734,7 @@ class _SearchScreenState extends State<SearchScreen>
               child: Stack(
                 children: [
                   CachedNetworkImage(
-                    imageUrl: anime.imageUrl,
+                    imageUrl: anime.largImageUrl ?? anime.imageUrl,
                     width: double.infinity,
                     height: double.infinity,
                     fit: BoxFit.cover,
@@ -728,6 +744,13 @@ class _SearchScreenState extends State<SearchScreen>
                         child: CircularProgressIndicator(
                           color: AppColors.primary,
                         ),
+                      ),
+                    ),
+                    errorWidget: (context, url, error) => Container(
+                      color: AppColors.surface,
+                      child: const Icon(
+                        Icons.image_not_supported_outlined,
+                        color: Colors.white54,
                       ),
                     ),
                   ),
