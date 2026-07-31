@@ -4,8 +4,8 @@ import 'package:http/http.dart' as http;
 
 /// Service to fetch episode-specific thumbnails from multiple sources
 class EpisodeThumbnailService {
-  static const String _tmdbApiKey =
-      '6c71a5457f310ab5f5464cf8bb67d365'; // Public TMDB API key
+  // Pass with: flutter run --dart-define=TMDB_API_KEY=your_key
+  static const String _tmdbApiKey = String.fromEnvironment('TMDB_API_KEY');
   static const String _tmdbApiBase = 'https://api.themoviedb.org/3';
   static const String _tmdbImageBase = 'https://image.tmdb.org/t/p/w500';
   static const String _kitsuApiBase = 'https://kitsu.io/api/edge';
@@ -46,6 +46,8 @@ class EpisodeThumbnailService {
     String animeTitle,
     int episodeNumber,
   ) async {
+    if (_tmdbApiKey.isEmpty) return null;
+
     try {
       // Clean the anime title
       final cleanTitle = animeTitle
@@ -278,6 +280,8 @@ class EpisodeThumbnailService {
     List<int> episodeNumbers,
   ) async {
     final Map<int, String> thumbnails = {};
+
+    if (_tmdbApiKey.isEmpty) return thumbnails;
 
     try {
       debugPrint('[EpisodeThumbnail] Trying AniList for ID: $anilistId');

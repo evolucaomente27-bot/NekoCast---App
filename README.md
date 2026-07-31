@@ -1,160 +1,155 @@
-<p align="center">
-</p>
-
-
-
-
 # NekoCast
 
-A Flutter-based mobile anime streaming app for iOS and Android with a beautiful, intuitive interface.
+Aplicativo Flutter para descobrir, acompanhar e assistir animes, além de pesquisar mangás e ler capítulos em dispositivos móveis e desktop.
 
+> **Status:** projeto em desenvolvimento. Algumas fontes externas podem ficar indisponíveis ou mudar de formato sem aviso.
 
+## Funcionalidades
 
-> [!WARNING]
-> Running this code may cause unexpected behavior, mild existential crises, or the sudden urge to refactor everything. Proceed with caution! This mobile project is still in early development phase and may be unstable.
+- Página inicial com destaques, temporadas, gêneros e animes populares.
+- Busca de animes e histórico de pesquisas.
+- Seleção entre fontes de conteúdo disponíveis.
+- Lista de episódios com reprodução de vídeo.
+- Controles de pular abertura e encerramento quando há dados disponíveis.
+- Lista de acompanhamento (watchlist) persistida localmente.
+- Downloads de episódios para assistir offline, com pausa, retomada e controle de qualidade.
+- Catálogo de mangás, capítulos, leitor e downloads.
+- Tema claro/escuro e interface em português ou inglês.
+- Layout responsivo para diferentes tamanhos de tela.
 
-## Prerequisites
+## Tecnologias
 
-Before you begin, ensure you have the following installed:
+- [Flutter](https://flutter.dev/) e Dart.
+- `provider` para gerenciamento de estado.
+- `sqflite` e `shared_preferences` para persistência local.
+- `video_player` e `chewie` para reprodução.
+- `http` e `html` para comunicação e processamento de fontes.
+- `cached_network_image` para cache de imagens.
 
-- [Flutter SDK](https://docs.flutter.dev/get-started/install) (version 3.9.2 or higher)
-- [Dart SDK](https://dart.dev/get-dart) (included with Flutter)
-- [Android Studio](https://developer.android.com/studio) or [VS Code](https://code.visualstudio.com/) with Flutter extensions
-- For iOS development: [Xcode](https://developer.apple.com/xcode/) (macOS only)
-- [Git](https://git-scm.com/)
+## Fontes e serviços externos
 
-## Getting Started
+O aplicativo integra serviços públicos para metadados, imagens, episódios e mangás, incluindo Jikan/MyAnimeList, AniList, AniSkip, AllAnime, MangaDex, Kitsu e TMDB.
 
-### 1. Clone the Repository
+A disponibilidade e os termos dessas fontes podem mudar. O projeto não hospeda nem distribui conteúdo protegido por direitos autorais. Use o aplicativo somente de acordo com as leis e os termos aplicáveis à sua região.
 
-```bash
-git clone <your-repository-url>
-cd NekoCast
-```
+## Requisitos
 
-### 2. Install Dependencies
+- Flutter SDK compatível com Dart `^3.9.2`.
+- Git.
+- Android Studio e Android SDK para Android.
+- Xcode em um Mac para iOS/macOS.
+- Um dispositivo físico ou emulador configurado.
 
-```bash
-flutter pub get
-```
+Confira o ambiente com:
 
-### 3. Run the Application
-
-#### For Development (Debug Mode)
-```bash
-# Run on connected device or emulator
-flutter run
-
-# Run on specific device
-flutter devices  # List available devices
-flutter run -d <device_id>
-```
-
-#### For Android
-```bash
-flutter run --release -d android
-```
-
-#### For iOS (macOS only)
-```bash
-flutter run --release -d ios
-```
-
-## Building for Production
-
-### Android APK
-
-#### Build APK
-```bash
-# Build release APK
-flutter build apk --release
-
-# Build APK for specific architecture (smaller file size)
-flutter build apk --release --target-platform android-arm64
-```
-
-The APK file will be located at: `build/app/outputs/flutter-apk/app-release.apk`
-
-#### Build App Bundle (Recommended for Play Store)
-```bash
-flutter build appbundle --release
-```
-
-The AAB file will be located at: `build/app/outputs/bundle/release/app-release.aab`
-
-### iOS App
-
-> **Note**: iOS builds require a macOS machine with Xcode installed and a valid Apple Developer account for distribution.
-
-#### Build for iOS
-```bash
-# Build iOS app
-flutter build ios --release
-
-# Build IPA for distribution
-flutter build ipa --release
-```
-
-The IPA file will be located at: `build/ios/ipa/`
-
-#### Additional iOS Setup
-1. Open `ios/Runner.xcworkspace` in Xcode
-2. Configure signing & capabilities with your Apple Developer account
-3. Set your Bundle Identifier
-4. Configure deployment target (iOS 12.0+)
-
-## Development Setup
-
-### Android Setup
-1. Install Android Studio
-2. Set up Android SDK and emulator
-3. Enable Developer Options and USB Debugging on your Android device
-
-### iOS Setup (macOS only)
-1. Install Xcode from the App Store
-2. Install Xcode Command Line Tools: `xcode-select --install`
-3. Set up iOS Simulator or connect a physical iOS device
-4. Sign in with your Apple ID in Xcode
-
-### Flutter Doctor
-Run the following command to check your Flutter installation:
 ```bash
 flutter doctor
 ```
 
-## Supported Platforms
+## Instalação
 
-- **Android**: API level 21+ (Android 5.0+)
-- **iOS**: iOS 12.0+
-- **Web**: Modern web browsers (experimental)
+```bash
+git clone https://github.com/evolucaomente27-bot/NekoCast---App.git
+cd NekoCast---App
+flutter pub get
+```
 
-## Contributing
+O TMDB é opcional. Para habilitar thumbnails adicionais, forneça a chave
+somente no ambiente local:
 
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+```bash
+flutter run --dart-define=TMDB_API_KEY=sua_chave
+```
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+Não coloque chaves de API diretamente no código ou no repositório.
 
-## License
+## Executar em desenvolvimento
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+```bash
+# Lista os dispositivos disponíveis
+flutter devices
 
-## Acknowledgments
+# Executa no dispositivo padrão
+flutter run
 
-- Rebranded as NekoCast for this project
-- Built with [Flutter](https://flutter.dev/)
-- Video playback powered by [Chewie](https://pub.dev/packages/chewie)
+# Executa em um dispositivo específico
+flutter run -d <device_id>
+```
 
-## Support
+## Verificação do projeto
 
-If you encounter any issues or have questions:
+```bash
+flutter analyze
+flutter test
+```
 
-1. Check your repository issues page
-2. Create a new issue if your problem isn't already reported
-3. Provide as much detail as possible including:
-   - Device information
-   - Flutter version
-   - Error messages or screenshots
+## Builds
+
+### Android APK
+
+```bash
+flutter build apk --release
+```
+
+Saída padrão: `build/app/outputs/flutter-apk/app-release.apk`.
+
+Para gerar um pacote para a Google Play:
+
+```bash
+flutter build appbundle --release
+```
+
+### iOS
+
+Requer macOS, Xcode, assinatura e configuração de um Apple Developer Account:
+
+```bash
+flutter build ipa --release
+```
+
+### Web, Windows, Linux e macOS
+
+```bash
+flutter build web --release
+flutter build windows --release
+flutter build linux --release
+flutter build macos --release
+```
+
+## Estrutura principal
+
+```text
+lib/
+├── models/       # Modelos de dados
+├── screens/      # Telas e fluxos de navegação
+├── services/     # APIs, banco local, downloads e preferências
+├── theme/        # Cores e tema do aplicativo
+├── utils/        # Utilitários compartilhados
+└── widgets/      # Componentes reutilizáveis
+```
+
+## Contribuição
+
+1. Crie uma branch para sua alteração:
+
+   ```bash
+   git checkout -b feature/minha-alteracao
+   ```
+
+2. Faça as mudanças e execute `flutter analyze` e `flutter test`.
+3. Crie um commit descritivo.
+4. Abra um Pull Request explicando o problema e a solução.
+
+## Licença
+
+Este projeto está disponível sob a licença MIT. Consulte [LICENSE](LICENSE).
+
+## Suporte
+
+Ao relatar um problema, inclua:
+
+- sistema operacional e versão;
+- versão do Flutter (`flutter --version`);
+- dispositivo ou emulador usado;
+- mensagem de erro e passos para reproduzir;
+- screenshots ou logs relevantes, quando possível.
