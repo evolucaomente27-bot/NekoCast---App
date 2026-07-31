@@ -225,6 +225,12 @@ class JikanService {
         fantasyAnimes: _parseAnimeList(batch2[2]),
       );
 
+      if (!homeData.hasContent) {
+        final fallback = _fallbackHomeData();
+        _homeDataCache = fallback;
+        return fallback;
+      }
+
       // Salva em memória e persistente
       _homeDataCache = homeData;
       if (homeData.hasContent) {
@@ -234,15 +240,9 @@ class JikanService {
       return homeData;
     } catch (e) {
       debugPrint('[JikanService] Error loading home data: $e');
-      // Retorna dados vazios em caso de erro
-      return HomeData(
-        seasonAnimes: [],
-        topAnimes: [],
-        actionAnimes: [],
-        romanceAnimes: [],
-        comedyAnimes: [],
-        fantasyAnimes: [],
-      );
+      final fallback = _fallbackHomeData();
+      _homeDataCache = fallback;
+      return fallback;
     } finally {
       _isLoadingHome = false;
     }
@@ -256,6 +256,57 @@ class JikanService {
       debugPrint('[JikanService] Home request failed: $e');
       return http.Response('{"data":[]}', 200);
     }
+  }
+
+  HomeData _fallbackHomeData() {
+    final fallback = [
+      JikanAnime(
+        malId: 52991,
+        title: 'Sousou no Frieren',
+        imageUrl: 'https://cdn.myanimelist.net/images/anime/1015/138006.jpg',
+        largImageUrl:
+            'https://cdn.myanimelist.net/images/anime/1015/138006.jpg',
+        score: 9.3,
+      ),
+      JikanAnime(
+        malId: 5114,
+        title: 'Fullmetal Alchemist: Brotherhood',
+        imageUrl: 'https://cdn.myanimelist.net/images/anime/1223/96541.jpg',
+        largImageUrl: 'https://cdn.myanimelist.net/images/anime/1223/96541.jpg',
+        score: 9.1,
+      ),
+      JikanAnime(
+        malId: 9253,
+        title: 'Steins;Gate',
+        imageUrl: 'https://cdn.myanimelist.net/images/anime/1935/127974.jpg',
+        largImageUrl:
+            'https://cdn.myanimelist.net/images/anime/1935/127974.jpg',
+        score: 9.0,
+      ),
+      JikanAnime(
+        malId: 11061,
+        title: 'Hunter x Hunter',
+        imageUrl: 'https://cdn.myanimelist.net/images/anime/1337/99013.jpg',
+        largImageUrl: 'https://cdn.myanimelist.net/images/anime/1337/99013.jpg',
+        score: 9.0,
+      ),
+      JikanAnime(
+        malId: 16498,
+        title: 'Shingeki no Kyojin',
+        imageUrl: 'https://cdn.myanimelist.net/images/anime/10/47347.jpg',
+        largImageUrl: 'https://cdn.myanimelist.net/images/anime/10/47347.jpg',
+        score: 8.5,
+      ),
+    ];
+
+    return HomeData(
+      seasonAnimes: fallback,
+      topAnimes: fallback,
+      actionAnimes: fallback,
+      romanceAnimes: fallback,
+      comedyAnimes: fallback,
+      fantasyAnimes: fallback,
+    );
   }
 
   Future<http.Response> _fetchWithRetry(
