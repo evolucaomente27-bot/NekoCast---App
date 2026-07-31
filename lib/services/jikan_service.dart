@@ -35,6 +35,14 @@ class HomeData {
 
   bool get isExpired => DateTime.now().difference(loadedAt).inMinutes > 30;
 
+  bool get hasContent =>
+      seasonAnimes.isNotEmpty ||
+      topAnimes.isNotEmpty ||
+      actionAnimes.isNotEmpty ||
+      romanceAnimes.isNotEmpty ||
+      comedyAnimes.isNotEmpty ||
+      fantasyAnimes.isNotEmpty;
+
   /// Serializa para JSON para persistência
   Map<String, dynamic> toJson() => {
     'seasonAnimes': seasonAnimes.map((a) => a.toJson()).toList(),
@@ -117,7 +125,7 @@ class JikanService {
       final jsonStr = prefs.getString(_homeDataCacheKey);
       if (jsonStr != null) {
         final data = HomeData.fromJson(json.decode(jsonStr));
-        if (!data.isExpired) {
+        if (!data.isExpired && data.hasContent) {
           debugPrint('[JikanService] Loaded home data from persistent cache');
           return data;
         }
@@ -178,9 +186,9 @@ class JikanService {
 
       // Batch 1: Season + Top + Action (3 requisições)
       final batch1 = await Future.wait([
-        _fetchWithRetry('$baseUrl/seasons/now?limit=15'),
-        _fetchWithRetry('$baseUrl/top/anime?limit=15'),
-        _fetchWithRetry(
+        _fetchHomeWithFallback('$baseUrl/seasons/now?limit=15'),
+        _fetchHomeWithFallback('$baseUrl/top/anime?limit=15'),
+        _fetchHomeWithFallback(
           '$baseUrl/anime?genres=${JikanGenreIds.action}&limit=15&order_by=score&sort=desc',
         ),
       ]);
@@ -190,13 +198,13 @@ class JikanService {
 
       // Batch 2: Romance + Comedy + Fantasy (3 requisições)
       final batch2 = await Future.wait([
-        _fetchWithRetry(
+        _fetchHomeWithFallback(
           '$baseUrl/anime?genres=${JikanGenreIds.romance}&limit=15&order_by=score&sort=desc',
         ),
-        _fetchWithRetry(
+        _fetchHomeWithFallback(
           '$baseUrl/anime?genres=${JikanGenreIds.comedy}&limit=15&order_by=score&sort=desc',
         ),
-        _fetchWithRetry(
+        _fetchHomeWithFallback(
           '$baseUrl/anime?genres=${JikanGenreIds.fantasy}&limit=15&order_by=score&sort=desc',
         ),
       ]);
@@ -217,7 +225,9 @@ class JikanService {
 
       // Salva em memória e persistente
       _homeDataCache = homeData;
-      _persistHomeData(homeData);
+      if (homeData.hasContent) {
+        _persistHomeData(homeData);
+      }
 
       return homeData;
     } catch (e) {
@@ -237,6 +247,15 @@ class JikanService {
   }
 
   /// Faz requisição HTTP com retry automático
+  Future<http.Response> _fetchHomeWithFallback(String url) async {
+    try {
+      return await _fetchWithRetry(url);
+    } catch (e) {
+      debugPrint('[JikanService] Home request failed: $e');
+      return http.Response('{"data":[]}', 200);
+    }
+  }
+
   Future<http.Response> _fetchWithRetry(
     String url, {
     int maxRetries = 2,
