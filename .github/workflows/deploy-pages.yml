@@ -7,13 +7,12 @@ on:
       - main
   workflow_dispatch:
 
-# Permissões necessárias para publicar no GitHub Pages
+# Permissões necessárias para publicar no GitHub Pages e na branch gh-pages
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
-# Permite apenas um deploy concorrente
 concurrency:
   group: "pages"
   cancel-in-progress: false
@@ -45,16 +44,27 @@ jobs:
           cd site
           npm run build
 
+      # 1. Publica na branch gh-pages (compatível com "Deploy from a branch")
+      - name: Publicar na branch gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site/dist
+
+      # 2. Publica via GitHub Actions oficial (compatível com "GitHub Actions")
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v5
+        continue-on-error: true
         with:
           enablement: true
 
       - name: Enviar Artefato
         uses: actions/upload-pages-artifact@v3
+        continue-on-error: true
         with:
           path: 'site/dist'
 
       - name: Publicar no GitHub Pages
+        continue-on-error: true
         id: deployment
         uses: actions/deploy-pages@v4
