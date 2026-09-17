@@ -1,0 +1,24 @@
+{
+  "name": "nekocast-video",
+  "version": "1.0.0",
+  "description": "Vídeos promocionais do NekoCast feitos com Remotion",
+  "scripts": {
+    "start": "remotion preview",
+    "preview": "remotion preview",
+    "build": "remotion render src/index.ts NekoCastPromoLandscape out/nekocast_promo_landscape.mp4",
+    "build:shorts": "remotion render src/index.ts NekoCastShorts out/nekocast_shorts.mp4",
+    "still:shorts": "remotion still src/index.ts NekoCastShorts out/preview_shorts.png --frame=60"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.218",
+    "lucide-react": "^0.469.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.218"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "typescript": "^5.7.2"
+  }
+}

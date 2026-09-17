@@ -1,0 +1,44 @@
+# NekoCast - Configuração Oficial para Hospedagem 100% Netlify (Serverless & Zero Servidor)
+[build]
+  publish = "site/dist"
+  command = "npm --prefix site install && npm --prefix site run build"
+
+# Redirecionamento SPA para a aplicação Flutter Web se compilada
+[[redirects]]
+  from = "/app/*"
+  to = "/app/:splat"
+  status = 200
+
+# Proxy transparente serverless no Edge do Netlify para APIs externas
+[[redirects]]
+  from = "/api/jikan/*"
+  to = "https://api.jikan.moe/v4/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/mangadex/*"
+  to = "https://api.mangadex.org/:splat"
+  status = 200
+  force = true
+
+# Redirecionamento principal SPA do site React/Vite
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Headers globais de segurança e CORS
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Access-Control-Allow-Origin = "*"
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer-when-downgrade"
+
+# Cache otimizado para assets estáticos
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

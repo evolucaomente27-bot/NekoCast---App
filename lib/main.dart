@@ -5,13 +5,14 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:chewie/chewie.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
-import 'package:sqflite/sqflite.dart';
-import 'package:video_player/video_player.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:media_kit_video/media_kit_video.dart';
+import 'package:better_player_plus/better_player_plus.dart';
+import 'widgets/desktop_video_player.dart';
 
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
@@ -21,20 +22,46 @@ import 'services/anilist_service.dart';
 import 'services/allanime_service.dart';
 import 'services/locale_service.dart';
 import 'services/episode_thumbnail_service.dart';
+import 'services/player_service.dart';
+import 'services/playback_wake_lock.dart';
+import 'services/watch_history_service.dart';
+import 'package:media_kit/media_kit.dart';
 import 'l10n/app_localizations.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'screens/main_navigation_screen.dart';
 import 'screens/video_player_screen.dart';
 import 'services/download_service.dart';
 import 'services/manga_service.dart';
+import 'services/doh_service.dart';
+import 'services/tv_mode_service.dart';
 import 'theme/app_colors.dart';
 import 'utils/performance_config.dart';
 import 'google_video_proxy.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  try {
+    MediaKit.ensureInitialized();
+  } catch (e) {
+    debugPrint('[MediaKit] Initialization warning: $e');
+  }
 
-  // Inicializa configurações de performance
+  // InicializaÃ§Ã£o do SQLite FFI para plataformas Desktop (Windows/Linux/macOS)
+  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
+
+  // Inicializa serviÃ§o DoH e sobrescreve resoluÃ§Ã£o HTTP globalmente
+  final dohService = DohService();
+  await dohService.load();
+  HttpOverrides.global = DohHttpOverrides(dohService);
+
+  // Inicializa serviÃ§o de Modo TV / Fire Stick
+  final tvModeService = TvModeService();
+  await tvModeService.initialize();
+
+  // Inicializa configuraÃ§Ãµes de performance
   PerformanceConfig.init();
 
   final downloadService = DownloadService();
@@ -44,7 +71,11 @@ void main() async {
       providers: [
         ChangeNotifierProvider(create: (_) => LocaleService()),
         ChangeNotifierProvider(create: (_) => MangaService()),
+        ChangeNotifierProvider(create: (_) => WatchHistoryService()..load()),
+        ChangeNotifierProvider(create: (_) => PlayerService()..load()),
+        ChangeNotifierProvider.value(value: dohService),
         ChangeNotifierProvider.value(value: downloadService),
+        ChangeNotifierProvider.value(value: tvModeService),
       ],
       child: const MyApp(),
     ),
@@ -109,6 +140,7 @@ class Episode {
   final String? thumbnail;
   final String? title;
   final String? description;
+  final String? audioType;
 
   Episode({
     required this.number,
@@ -116,10 +148,14 @@ class Episode {
     this.thumbnail,
     this.title,
     this.description,
+    this.audioType,
   });
 
   @override
   String toString() => number;
+
+  bool get isDubbed => audioType?.toLowerCase().contains('dub') ?? false;
+  bool get isSubbed => audioType?.toLowerCase().contains('leg') ?? false;
 
   /// Get episode thumbnail URL
   String? getImageUrl() => thumbnail;
@@ -181,13 +217,34 @@ class StreamEpisodeListItem {
   }
 }
 
-enum AnimeSource { animeFire, allAnime }
+enum AnimeSource {
+  animeFire,
+  allAnime,
+  hiAnime,
+  consumet,
+  sugoi,
+  anify,
+  animesOnline,
+  animesOrion,
+  animesDigital,
+}
 
 class Anime {
   final String name;
   final String url;
   final AnimeSource source;
-  final String? allAnimeId; // ID do AllAnime para buscar episódios
+  final String? allAnimeId; // ID do AllAnime para buscar episÃ³dios
+  final String? allAnimeMode; // 'sub' ou 'dub'
+  final String? hiAnimeId; // ID do HiAnime para buscar episÃ³dios
+  final String? consumetId; // ID do Consumet
+  final String? consumetMode; // 'sub' ou 'dub'
+  final String? sugoiId; // ID do SugoiAPI PT-BR
+  final String? anifyId; // ID do Anify
+  final String? animesOnlineId; // ID do AnimesOnline PT-BR
+  final String? animesOrionId; // ID do AnimesOrion PT-BR
+  final String? animesDigitalId; // ID do AnimesDigital PT-BR
+  final String? animesDigitalUrl; // URL do AnimesDigital PT-BR
+  final String? audioType; // 'Dublado & Legendado', 'Dublado', 'Legendado'
   final String?
   fallbackImageUrl; // Imagem de fallback antes do AniList carregar
   MediaDetails? aniListData;
@@ -198,6 +255,17 @@ class Anime {
     required this.url,
     this.source = AnimeSource.animeFire,
     this.allAnimeId,
+    this.allAnimeMode,
+    this.hiAnimeId,
+    this.consumetId,
+    this.consumetMode,
+    this.sugoiId,
+    this.anifyId,
+    this.animesOnlineId,
+    this.animesOrionId,
+    this.animesDigitalId,
+    this.animesDigitalUrl,
+    this.audioType,
     this.aniListData,
     this.fallbackImageUrl,
   });
@@ -205,17 +273,100 @@ class Anime {
   @override
   String toString() => name;
 
+  int? malIdOverride;
+  int? anilistIdOverride;
+
   String get imageUrl => aniListData?.coverImage.best ?? fallbackImageUrl ?? '';
   String get bannerUrl => aniListData?.bannerImage ?? '';
   String get description => aniListData?.description ?? '';
-  int? get malId => aniListData?.idMal;
-  int? get anilistId => aniListData?.id;
+  int? get malId => aniListData?.idMal ?? malIdOverride;
+  int? get anilistId => aniListData?.id ?? anilistIdOverride;
   List<String> get genres => aniListData?.genres ?? [];
   String? get status => aniListData?.status;
   int? get episodeCount => aniListData?.episodes;
   double? get averageScore => aniListData?.averageScore;
-  String get sourceName =>
-      source == AnimeSource.animeFire ? 'AnimeFire' : 'AllAnime';
+  bool get isDubbed =>
+      (audioType?.toLowerCase().contains('dub') ?? false) ||
+      allAnimeMode == 'dub' ||
+      consumetMode == 'dub' ||
+      name.toLowerCase().contains('dublado') ||
+      name.toLowerCase().contains('(dub)');
+  String get sourceName {
+    switch (source) {
+      case AnimeSource.animeFire:
+        return 'AnimeFire';
+      case AnimeSource.allAnime:
+        return 'AllAnime';
+      case AnimeSource.hiAnime:
+        return 'HiAnime (HD)';
+      case AnimeSource.consumet:
+        return 'Consumet (Global)';
+      case AnimeSource.sugoi:
+        return 'SugoiAPI (PT-BR)';
+      case AnimeSource.anify:
+        return 'Anify';
+      case AnimeSource.animesOnline:
+        return 'AnimesOnline (PT-BR)';
+      case AnimeSource.animesOrion:
+        return 'AnimesOrion (PT-BR)';
+      case AnimeSource.animesDigital:
+        return 'AnimesDigital (PT-BR)';
+    }
+  }
+}
+
+class EpisodeStreamOption {
+  final String url;
+  final String audio; // 'dublado', 'legendado', etc.
+  final List<String> qualities;
+
+  EpisodeStreamOption({
+    required this.url,
+    required this.audio,
+    this.qualities = const [],
+  });
+
+  String get streamUrl => url;
+  String get audioType => audio;
+  bool get isDubbed => audio.toLowerCase().contains('dub');
+  bool get isSubbed => audio.toLowerCase().contains('leg');
+
+  String get label => displayName;
+  String get displayName {
+    if (isDubbed) return 'Dublado (PT-BR)';
+    if (isSubbed) return 'Legendado';
+    return audio.isNotEmpty ? audio : 'Padrão';
+  }
+}
+
+class EpisodeStreamResult {
+  final String primaryUrl;
+  final List<EpisodeStreamOption> availableStreams;
+  final String currentAudio;
+
+  EpisodeStreamResult({
+    required this.primaryUrl,
+    required this.availableStreams,
+    required this.currentAudio,
+  });
+
+  bool get hasMultipleAudio => availableStreams.length > 1;
+
+  EpisodeStreamOption? get selectedStream {
+    try {
+      return availableStreams.firstWhere(
+        (s) => s.audio == currentAudio,
+        orElse: () => availableStreams.firstWhere(
+          (s) => s.url == primaryUrl,
+          orElse: () => availableStreams.isNotEmpty
+              ? availableStreams.first
+              : EpisodeStreamOption(url: primaryUrl, audio: currentAudio),
+        ),
+      );
+    } catch (_) {
+      return EpisodeStreamOption(url: primaryUrl, audio: currentAudio);
+    }
+  }
 }
 
 class VideoData {
@@ -331,7 +482,11 @@ class DatabaseHelper {
 
 // API Service
 class AnimeService {
-  static const String baseSiteUrl = 'https://animefire.plus';
+  // O AnimeFire migrou para o domÃ­nio .io e a busca antiga
+  // /pesquisar/<slug> deixou de ser a rota principal.
+  static const String baseSiteUrl = 'https://animefire.one';
+  static const String _animeFireApiBaseUrl = 'https://api.animefire.one';
+  static const String _legacyBaseSiteUrl = 'https://animefire.plus';
   static const String _googleVideoUserAgent =
       'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1';
   static const String _bloggerOrigin = 'https://www.blogger.com';
@@ -368,7 +523,14 @@ class AnimeService {
   }
 
   static Future<List<Anime>> searchAnimeFireOnly(String animeName) async {
-    return _searchSourceWithVariants(animeName, _searchAnimeFire);
+    // A busca atual do AnimeFire jÃ¡ normaliza acentos e espaÃ§os. Repetir as
+    // variaÃ§Ãµes antigas gerava vÃ¡rias requisiÃ§Ãµes 400 para a mesma pesquisa.
+    final results = await _searchAnimeFire(animeName);
+    if (results.isNotEmpty) return results;
+
+    final normalized = _normalizeAnimeFireQuery(animeName);
+    if (normalized.isEmpty || normalized == animeName.trim()) return results;
+    return _searchAnimeFire(normalized);
   }
 
   static Future<List<Anime>> searchAllAnimeOnly(String animeName) async {
@@ -413,58 +575,380 @@ class AnimeService {
 
   /// Busca no AnimeFire
   static Future<List<Anime>> _searchAnimeFire(String animeName) async {
-    final String searchUrl =
-        '$baseSiteUrl/pesquisar/${_treatAnimeName(animeName)}';
-
     try {
-      final response = await http
-          .get(Uri.parse(searchUrl))
+      final query = animeName.trim();
+      final apiSearchUrl = Uri.parse(
+        '$_animeFireApiBaseUrl/animes/pesquisar?q=${Uri.encodeComponent(query)}&v=2',
+      );
+
+      // O site atual renderiza os cards no navegador; a API entrega os dados
+      // diretamente e evita depender de seletores HTML que mudam com o layout.
+      final apiResponse = await http
+          .get(
+            apiSearchUrl,
+            headers: {
+              HttpHeaders.acceptHeader: 'application/json',
+              HttpHeaders.acceptLanguageHeader: 'pt-BR,pt;q=0.9,en;q=0.8',
+              HttpHeaders.userAgentHeader:
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                  '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+              HttpHeaders.refererHeader: '$baseSiteUrl/animes/pesquisar',
+            },
+          )
           .timeout(const Duration(seconds: 10));
 
-      if (response.statusCode != 200) {
-        debugPrint('[AnimeFire] Search failed: ${response.statusCode}');
-        return [];
+      if (apiResponse.statusCode == 200) {
+        final apiResults = _parseAnimeFireApiResults(apiResponse.body);
+        if (apiResults.isNotEmpty) {
+          debugPrint('[AnimeFire] API returned ${apiResults.length} results');
+          return apiResults;
+        }
+      } else {
+        debugPrint(
+          '[AnimeFire] API search failed (${apiResponse.statusCode}): $apiSearchUrl',
+        );
       }
 
-      final document = html_parser.parse(response.body);
-      final animeElements = document.querySelectorAll('.row.ml-1.mr-1 a');
+      // Fallback HTML para instalaÃ§Ãµes antigas do AnimeFire.
+      final currentSearchUrl = Uri.parse(
+        '$baseSiteUrl/animes/pesquisar?q=${Uri.encodeComponent(query)}',
+      );
+      final legacySearchUrl = Uri.parse(
+        '$_legacyBaseSiteUrl/pesquisar/${_treatAnimeName(animeName)}',
+      );
 
-      List<Anime> animes = [];
-      for (var element in animeElements) {
-        final name = element.text.trim();
-        final url = element.attributes['href'] ?? '';
+      for (final searchUrl in [currentSearchUrl, legacySearchUrl]) {
+        final response = await http
+            .get(
+              searchUrl,
+              headers: {
+                HttpHeaders.acceptHeader:
+                    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                HttpHeaders.acceptLanguageHeader: 'pt-BR,pt;q=0.9,en;q=0.8',
+                HttpHeaders.userAgentHeader:
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                    '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                HttpHeaders.refererHeader: '$baseSiteUrl/animes/pesquisar',
+                'Origin': baseSiteUrl,
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1',
+              },
+            )
+            .timeout(const Duration(seconds: 10));
 
-        // Try to get thumbnail from img element
-        String? thumbnail;
-        final imgElement = element.querySelector('img.imgAnimes');
-        if (imgElement != null) {
-          thumbnail =
-              imgElement.attributes['data-src'] ?? imgElement.attributes['src'];
-        }
-
-        if (name.isNotEmpty && url.isNotEmpty) {
-          animes.add(
-            Anime(
-              name: name,
-              url: url,
-              source: AnimeSource.animeFire,
-              fallbackImageUrl: thumbnail,
-            ),
+        if (response.statusCode != 200) {
+          debugPrint(
+            '[AnimeFire] Search failed (${response.statusCode}): $searchUrl',
           );
+          continue;
+        }
 
-          // Debug first few results
-          if (animes.length <= 3) {
-            debugPrint('[AnimeFire] Anime: $name, thumbnail: $thumbnail');
-          }
+        final animes = _parseAnimeFireSearchResults(response.body);
+        if (animes.isNotEmpty || searchUrl == legacySearchUrl) {
+          debugPrint('[AnimeFire] Found ${animes.length} results');
+          return animes;
         }
       }
 
-      debugPrint('[AnimeFire] Found ${animes.length} results');
-      return animes;
+      return [];
     } catch (e) {
       debugPrint('[AnimeFire] Search error: $e');
       return [];
     }
+  }
+
+  static List<Anime> _parseAnimeFireApiResults(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      final data = decoded is Map<String, dynamic> ? decoded['data'] : null;
+      if (data is! List) return [];
+
+      return data
+          .whereType<Map>()
+          .map((item) {
+            final id = item['id']?.toString().trim() ?? '';
+            String title = item['title']?.toString().trim() ?? '';
+            if (title.isEmpty && item['titles'] is Map) {
+              final titles = item['titles'] as Map;
+              title = titles['BR']?.toString().trim() ??
+                  titles['EN']?.toString().trim() ??
+                  titles['JP']?.toString().trim() ??
+                  '';
+            }
+            if (title.isEmpty) {
+              title = item['name']?.toString().trim() ?? '';
+            }
+
+            final poster = item['poster_src']?.toString().trim() ??
+                item['image']?.toString().trim();
+            final audio = item['audio']?.toString().trim();
+            if (id.isEmpty || title.isEmpty) return null;
+
+            return Anime(
+              name: title,
+              url: '$baseSiteUrl/anime/$id',
+              source: AnimeSource.animeFire,
+              audioType: audio,
+              fallbackImageUrl: poster?.isNotEmpty == true ? poster : null,
+            );
+          })
+          .whereType<Anime>()
+          .toList();
+    } catch (e) {
+      debugPrint('[AnimeFire] Invalid API search response: $e');
+      return [];
+    }
+  }
+
+  /// Busca um catálogo curado de animes com dublagem brasileira (PT-BR) no AnimeFire.
+  static Future<List<Anime>> getDubbedAnimes({int limit = 30}) async {
+    final results = <Anime>[];
+    final seenIds = <String>{};
+
+    final endpoints = [
+      '$_animeFireApiBaseUrl/animes/lancamentos?v=2',
+      '$_animeFireApiBaseUrl/animes?v=2',
+      '$_animeFireApiBaseUrl/animes/pesquisar?q=dublado&v=2',
+      '$_animeFireApiBaseUrl/animes/pesquisar?q=naruto%20dublado&v=2',
+      '$_animeFireApiBaseUrl/animes/pesquisar?q=dragon%20ball%20dublado&v=2',
+    ];
+
+    for (final ep in endpoints) {
+      try {
+        final response = await http.get(
+          Uri.parse(ep),
+          headers: {
+            HttpHeaders.acceptHeader: 'application/json',
+            HttpHeaders.acceptLanguageHeader: 'pt-BR,pt;q=0.9,en;q=0.8',
+            HttpHeaders.userAgentHeader:
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            HttpHeaders.refererHeader: '$baseSiteUrl/',
+          },
+        ).timeout(const Duration(seconds: 6));
+
+        if (response.statusCode == 200) {
+          final animes = _parseAnimeFireApiResults(response.body);
+          for (final anime in animes) {
+            if (anime.isDubbed) {
+              final id = _animeFireIdFromUrl(anime.url) ?? anime.name;
+              if (seenIds.add(id)) {
+                results.add(anime);
+                if (results.length >= limit) break;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('[AnimeFire] Error fetching dubbed animes from $ep: $e');
+      }
+      if (results.length >= limit) break;
+    }
+
+    return results;
+  }
+
+  static String? _animeFireIdFromUrl(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri == null) return null;
+    final segments = uri.pathSegments;
+    if (segments.length < 2 || segments[segments.length - 2] != 'anime') {
+      return null;
+    }
+    final id = segments.last.trim();
+    return id.isEmpty ? null : id;
+  }
+
+  static String? _animeFireSearchTitleFromLegacyUrl(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri == null) return null;
+
+    final segments = uri.pathSegments;
+    final animesIndex = segments.indexOf('animes');
+    if (animesIndex == -1 || animesIndex + 1 >= segments.length) {
+      return null;
+    }
+
+    final slug = segments[animesIndex + 1]
+        .replaceFirst(RegExp(r'-todos-os-episodios$', caseSensitive: false), '')
+        .replaceAll('-', ' ')
+        .trim();
+    return slug.isEmpty ? null : slug;
+  }
+
+  static int? _animeFireEpisodeNumberFromLegacyUrl(String value) {
+    final segments = Uri.tryParse(value)?.pathSegments ?? const <String>[];
+    if (segments.isEmpty) return null;
+    return int.tryParse(segments.last);
+  }
+
+  static Future<String?> _findAnimeFireIdByTitle(String title) async {
+    final query = title.trim();
+    if (query.isEmpty) return null;
+
+    try {
+      final response = await http
+          .get(
+            Uri.parse(
+              '$_animeFireApiBaseUrl/animes/pesquisar?q=${Uri.encodeComponent(query)}&v=2',
+            ),
+            headers: {
+              HttpHeaders.acceptHeader: 'application/json',
+              HttpHeaders.refererHeader: '$baseSiteUrl/animes/pesquisar',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200) return null;
+
+      final matches = _parseAnimeFireApiResults(response.body);
+      if (matches.isEmpty) return null;
+
+      final normalizedQuery = _normalizeAnimeTitle(query);
+      matches.sort(
+        (a, b) =>
+            _scoreTitleMatch(
+              _normalizeAnimeTitle(b.name),
+              normalizedQuery,
+            ).compareTo(
+              _scoreTitleMatch(_normalizeAnimeTitle(a.name), normalizedQuery),
+            ),
+      );
+      return _animeFireIdFromUrl(matches.first.url);
+    } catch (e) {
+      debugPrint('[AnimeFire] Could not resolve "$title" in the API: $e');
+      return null;
+    }
+  }
+
+  static Future<String?> _resolveLegacyAnimeFireEpisodeUrl(
+    String episodeUrl, {
+    String? animeTitle,
+  }) async {
+    final episodeNumber = _animeFireEpisodeNumberFromLegacyUrl(episodeUrl);
+    if (episodeNumber == null) return null;
+
+    final queries = <String>{};
+    final legacyTitle = _animeFireSearchTitleFromLegacyUrl(episodeUrl);
+    if (legacyTitle != null) queries.add(legacyTitle);
+    if (animeTitle?.trim().isNotEmpty == true) queries.add(animeTitle!.trim());
+
+    for (final query in queries) {
+      final animeId = await _findAnimeFireIdByTitle(query);
+      if (animeId == null) continue;
+
+      try {
+        final response = await http
+            .get(
+              Uri.parse('$_animeFireApiBaseUrl/anime/$animeId?v=2'),
+              headers: {HttpHeaders.acceptHeader: 'application/json'},
+            )
+            .timeout(const Duration(seconds: 10));
+        if (response.statusCode != 200) continue;
+
+        final decoded = jsonDecode(response.body);
+        final data = decoded is Map<String, dynamic> ? decoded['data'] : null;
+        final episodes = data is Map<String, dynamic> ? data['episodes'] : null;
+        if (episodes is! List) continue;
+
+        for (final episode in episodes.whereType<Map>()) {
+          if (episode['number']?.toString() != episodeNumber.toString()) {
+            continue;
+          }
+          final id = episode['id']?.toString().trim() ?? '';
+          if (id.isNotEmpty) {
+            return '$_animeFireApiBaseUrl/episode/$id';
+          }
+        }
+      } catch (e) {
+        debugPrint('[AnimeFire] Could not resolve legacy episode: $e');
+      }
+    }
+
+    return null;
+  }
+
+  static String _normalizeAnimeFireQuery(String value) {
+    return value
+        .trim()
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .replaceAll(RegExp(r'[:-]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  static List<Anime> _parseAnimeFireSearchResults(String body) {
+    final document = html_parser.parse(body);
+    final elements = document.querySelectorAll(
+      'a[href^="/anime/"], a[href*="/anime/"], '
+      '.row.ml-1.mr-1 a, .card_ani .ani_name a',
+    );
+
+    final animes = <Anime>[];
+    final seenUrls = <String>{};
+
+    for (final element in elements) {
+      final rawUrl = element.attributes['href']?.trim() ?? '';
+      if (rawUrl.isEmpty || !_isAnimeFireAnimeUrl(rawUrl)) continue;
+
+      final url = _resolveAnimeFireUrl(rawUrl);
+      if (!seenUrls.add(url)) continue;
+
+      final card = element.parent?.parent;
+      final titleElement =
+          element.querySelector('h3') ??
+          card?.querySelector('h3') ??
+          element.querySelector('.ani_name');
+      final name = (titleElement?.text ?? element.text).trim().replaceAll(
+        RegExp(r'\s+'),
+        ' ',
+      );
+      if (name.isEmpty) continue;
+
+      final imageElement =
+          element.querySelector('img') ??
+          card?.querySelector('img') ??
+          element.parent?.querySelector('img');
+      final thumbnail =
+          imageElement?.attributes['data-src'] ??
+          imageElement?.attributes['data-lazy-src'] ??
+          imageElement?.attributes['src'];
+
+      final anime = Anime(
+        name: name,
+        url: url,
+        source: AnimeSource.animeFire,
+        fallbackImageUrl: thumbnail?.trim().isEmpty == true
+            ? null
+            : thumbnail?.trim(),
+      );
+      animes.add(anime);
+
+      if (animes.length <= 3) {
+        debugPrint('[AnimeFire] Anime: $name, thumbnail: $thumbnail');
+      }
+    }
+
+    return animes;
+  }
+
+  static bool _isAnimeFireAnimeUrl(String rawUrl) {
+    final normalized = rawUrl.toLowerCase();
+    return normalized.startsWith('/anime/') ||
+        normalized.startsWith('/animes/') ||
+        normalized.startsWith('https://animefire.one/anime/') ||
+        normalized.startsWith('https://animefire.one/animes/') ||
+        normalized.startsWith('https://animefire.io/anime/') ||
+        normalized.startsWith('https://animefire.plus/animes/') ||
+        normalized.startsWith('https://animefire.plus/anime/');
+  }
+
+  static String _resolveAnimeFireUrl(String rawUrl) {
+    final parsed = Uri.tryParse(rawUrl);
+    if (parsed != null && parsed.hasScheme) return parsed.toString();
+    return Uri.parse(baseSiteUrl).resolve(rawUrl).toString();
   }
 
   /// Busca no AllAnime
@@ -483,7 +967,7 @@ class AnimeService {
             ? ' (${show.episodeCount} eps)'
             : '';
 
-        // Usar thumbnail do AllAnime como fallback se disponível
+        // Usar thumbnail do AllAnime como fallback se disponÃ­vel
         final fallbackImage = show.thumbnail?.isNotEmpty == true
             ? show.thumbnail!
             : null;
@@ -491,10 +975,10 @@ class AnimeService {
         animes.add(
           Anime(
             name: '${show.displayName}$episodeInfo',
-            url: show.id, // Para AllAnime, a "URL" é o ID
+            url: show.id, // Para AllAnime, a "URL" Ã© o ID
             source: AnimeSource.allAnime,
             allAnimeId: show.id,
-            fallbackImageUrl: fallbackImage, // Fallback até AniList carregar
+            fallbackImageUrl: fallbackImage, // Fallback atÃ© AniList carregar
           ),
         );
       }
@@ -555,39 +1039,108 @@ class AnimeService {
     }
   }
 
-  /// Busca episódios do AnimeFire
+  /// Busca episÃ³dios do AnimeFire
   static Future<List<Episode>> _getEpisodesFromAnimeFire(Anime anime) async {
     try {
       debugPrint('[AnimeFire] Fetching episodes for: ${anime.name}');
       debugPrint('[AnimeFire] Anime thumbnail: ${anime.imageUrl}');
 
-      final response = await http
-          .get(Uri.parse(anime.url))
-          .timeout(const Duration(seconds: 10));
-
-      if (response.statusCode != 200) {
-        throw Exception('Failed to get episodes: ${response.statusCode}');
-      }
-
-      final document = html_parser.parse(response.body);
-      final episodeElements = document.querySelectorAll(
-        'a.lEp.epT.divNumEp.smallbox.px-2.mx-1.text-left.d-flex',
-      );
-
-      // Extract episode numbers
       List<int> episodeNumbers = [];
       List<Episode> tempEpisodes = [];
 
-      for (var element in episodeElements) {
-        final number = element.text.trim();
-        final url = element.attributes['href'] ?? '';
-        if (number.isNotEmpty && url.isNotEmpty) {
-          final episodeNumMatch = RegExp(r'\d+').firstMatch(number);
-          if (episodeNumMatch != null) {
-            final epNum = int.tryParse(episodeNumMatch.group(0)!);
-            if (epNum != null) {
+      var animeId = _animeFireIdFromUrl(anime.url);
+      animeId ??= await _findAnimeFireIdByTitle(
+        _animeFireSearchTitleFromLegacyUrl(anime.url) ?? anime.name,
+      );
+      if (animeId != null) {
+        final apiUrl = Uri.parse('$_animeFireApiBaseUrl/anime/$animeId?v=2');
+        final apiResponse = await http
+            .get(
+              apiUrl,
+              headers: {
+                HttpHeaders.acceptHeader: 'application/json',
+                HttpHeaders.userAgentHeader:
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                    '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                HttpHeaders.refererHeader: anime.url,
+              },
+            )
+            .timeout(const Duration(seconds: 10));
+
+        if (apiResponse.statusCode == 200) {
+          final decoded = jsonDecode(apiResponse.body);
+          final data = decoded is Map<String, dynamic> ? decoded['data'] : null;
+          final apiEpisodes = data is Map<String, dynamic>
+              ? data['episodes']
+              : null;
+
+          if (apiEpisodes is List) {
+            // Verificar se o anime possui múltiplas temporadas
+            int maxSeason = 1;
+            for (final item in apiEpisodes.whereType<Map>()) {
+              final s = int.tryParse(item['season']?.toString() ?? '1') ?? 1;
+              if (s > maxSeason) maxSeason = s;
+            }
+
+            for (final item in apiEpisodes.whereType<Map>()) {
+              final id = item['id']?.toString().trim() ?? '';
+              final number = item['number']?.toString().trim() ?? '';
+              if (id.isEmpty || number.isEmpty) continue;
+
+              final epNum = int.tryParse(number);
+              if (epNum == null) continue;
+
+              final season =
+                  int.tryParse(item['season']?.toString() ?? '1') ?? 1;
+              final displayPrefix = maxSeason > 1
+                  ? 'T$season: Ep $number'
+                  : 'Episódio $number';
+
               episodeNumbers.add(epNum);
-              tempEpisodes.add(Episode(number: number, url: url));
+              tempEpisodes.add(
+                Episode(
+                  number: displayPrefix,
+                  url: '$_animeFireApiBaseUrl/episode/$id',
+                  title: item['title']?.toString(),
+                  description: item['synopsis']?.toString(),
+                  thumbnail: item['still_src']?.toString(),
+                  audioType: item['audio']?.toString(),
+                ),
+              );
+            }
+          }
+        }
+      }
+
+      // Compatibilidade com o HTML do domÃ­nio antigo.
+      if (tempEpisodes.isEmpty) {
+        final response = await http
+            .get(
+              Uri.parse(anime.url),
+              headers: _buildRequestHeaders(referer: baseSiteUrl),
+            )
+            .timeout(const Duration(seconds: 10));
+
+        if (response.statusCode != 200) {
+          throw Exception('Failed to get episodes: ${response.statusCode}');
+        }
+
+        final document = html_parser.parse(response.body);
+        final episodeElements = document.querySelectorAll(
+          'a.lEp.epT.divNumEp.smallbox.px-2.mx-1.text-left.d-flex',
+        );
+
+        for (var element in episodeElements) {
+          final number = element.text.trim();
+          final url = element.attributes['href'] ?? '';
+          if (number.isNotEmpty && url.isNotEmpty) {
+            final episodeNumMatch = RegExp(r'\d+').firstMatch(number);
+            if (episodeNumMatch != null) {
+              final epNum = int.tryParse(episodeNumMatch.group(0)!);
+              if (epNum != null) {
+                episodeNumbers.add(epNum);
+                tempEpisodes.add(Episode(number: number, url: url));
+              }
             }
           }
         }
@@ -615,7 +1168,12 @@ class AnimeService {
 
         // Priority: Kitsu thumbnail > Anime thumbnail
         String? episodeThumbnail;
-        if (kitsuThumbnails.containsKey(epNum)) {
+        if (tempEp.thumbnail?.isNotEmpty == true) {
+          episodeThumbnail = tempEp.thumbnail;
+          if (episodes.length < 3) {
+            debugPrint('[AnimeFire] Episode $epNum: Using AnimeFire thumbnail');
+          }
+        } else if (kitsuThumbnails.containsKey(epNum)) {
           episodeThumbnail = kitsuThumbnails[epNum];
           if (episodes.length < 3) {
             debugPrint('[AnimeFire] Episode $epNum: Using Kitsu thumbnail');
@@ -646,7 +1204,7 @@ class AnimeService {
     }
   }
 
-  /// Busca episódios do AllAnime com thumbnails
+  /// Busca episÃ³dios do AllAnime com thumbnails
   static Future<List<Episode>> _getEpisodesFromAllAnime(Anime anime) async {
     try {
       final animeId = anime.allAnimeId ?? anime.url;
@@ -690,8 +1248,8 @@ class AnimeService {
       List<Episode> episodes = [];
       for (var allAnimeEp in detailedEpisodes) {
         final displayNumber = allAnimeEp.episodeNumber.contains('.')
-            ? 'Episódio ${allAnimeEp.episodeNumber}'
-            : 'Episódio ${allAnimeEp.episodeNumber}';
+            ? 'EpisÃ³dio ${allAnimeEp.episodeNumber}'
+            : 'EpisÃ³dio ${allAnimeEp.episodeNumber}';
 
         // Priority: Kitsu thumbnail > AllAnime thumbnail > Show thumbnail
         String? episodeThumbnail;
@@ -713,7 +1271,7 @@ class AnimeService {
           Episode(
             number: displayNumber,
             url: allAnimeEp
-                .episodeNumber, // Para AllAnime, guardamos o número do episódio
+                .episodeNumber, // Para AllAnime, guardamos o nÃºmero do episÃ³dio
             thumbnail: episodeThumbnail, // Add thumbnail (with fallback)
             title: allAnimeEp.title,
             description: allAnimeEp.description,
@@ -738,80 +1296,214 @@ class AnimeService {
     }
   }
 
-  static Future<String> extractVideoURL(String episodeUrl) async {
+  static Future<EpisodeStreamResult> getEpisodeStreams(
+    String episodeUrl, {
+    String? animeTitle,
+    String? preferredAudio,
+  }) async {
     try {
-      debugPrint('Extracting video URL from page: $episodeUrl');
+      debugPrint('Extracting video streams from page: $episodeUrl');
 
-      final response = await http.get(Uri.parse(episodeUrl));
-      if (response.statusCode != 200) {
-        throw Exception('Failed to get video page: ${response.statusCode}');
+      var resolvedEpisodeUrl = episodeUrl;
+      final sourceUri = Uri.tryParse(episodeUrl);
+      final isLegacyAnimeFireEpisode =
+          sourceUri != null &&
+          (sourceUri.host == 'animefire.one' ||
+              sourceUri.host == 'animefire.io' ||
+              sourceUri.host == 'animefire.plus') &&
+          sourceUri.pathSegments.contains('animes');
+      if (isLegacyAnimeFireEpisode) {
+        final apiEpisodeUrl = await _resolveLegacyAnimeFireEpisodeUrl(
+          episodeUrl,
+          animeTitle: animeTitle,
+        );
+        if (apiEpisodeUrl != null) {
+          resolvedEpisodeUrl = apiEpisodeUrl;
+          debugPrint(
+            '[AnimeFire] Legacy episode resolved: $resolvedEpisodeUrl',
+          );
+        }
       }
 
-      final document = html_parser.parse(response.body);
+      final isApiEpisode = resolvedEpisodeUrl.startsWith(_animeFireApiBaseUrl) ||
+          resolvedEpisodeUrl.contains('api.animefire.') ||
+          resolvedEpisodeUrl.contains('/episode/');
 
-      // Try different selectors for video elements
-      final selectors = [
-        'video',
-        'div[data-video-src]',
-        'div[data-src]',
-        'div[data-url]',
-        'div[data-video]',
-        'div[data-player]',
-        'iframe[src*="video"]',
-        'iframe[src*="player"]',
-      ];
+      if (isApiEpisode) {
+        var apiEpisodeUrl = resolvedEpisodeUrl;
+        if (apiEpisodeUrl.contains('api.animefire.io')) {
+          apiEpisodeUrl = apiEpisodeUrl.replaceAll('api.animefire.io', 'api.animefire.one');
+        }
+        if (!apiEpisodeUrl.contains('v=')) {
+          apiEpisodeUrl += apiEpisodeUrl.contains('?') ? '&v=2' : '?v=2';
+        }
+        final response = await http.get(
+          Uri.parse(apiEpisodeUrl),
+          headers: _buildRequestHeaders(referer: baseSiteUrl),
+        );
+        if (response.statusCode != 200) {
+          throw Exception('Failed to get video page: ${response.statusCode}');
+        }
 
-      for (String selector in selectors) {
-        final elements = document.querySelectorAll(selector);
-        if (elements.isNotEmpty) {
-          debugPrint('Found elements with selector: $selector');
+        final decoded = jsonDecode(response.body);
+        final data = decoded is Map<String, dynamic> ? decoded['data'] : null;
+        final streams = data is Map<String, dynamic> ? data['streams'] : null;
+        if (streams is List && streams.isNotEmpty) {
+          final streamList = streams.whereType<Map>().toList();
+          final streamOptions = streamList.map((s) {
+            final url = s['url']?.toString().trim() ?? '';
+            final audio = s['audio']?.toString().trim() ?? '';
+            final rawQualities = s['qualities'] as List?;
+            final qualities = rawQualities?.map((q) => q.toString()).toList() ?? <String>[];
+            return EpisodeStreamOption(url: url, audio: audio, qualities: qualities);
+          }).where((opt) => opt.url.isNotEmpty).toList();
 
-          // Try different attribute names
-          final attributes = [
-            'data-video-src',
-            'data-src',
-            'data-url',
-            'data-video',
-            'src',
-          ];
+          if (streamOptions.isNotEmpty) {
+            final titleLower = (animeTitle ?? '').toLowerCase();
+            final titleWantsDub = titleLower.contains('dublado') || titleLower.contains('(dub)');
+            final prefAudioLower = (preferredAudio ?? '').toLowerCase();
+            final wantsDub = prefAudioLower.contains('dub') || (prefAudioLower.isEmpty && titleWantsDub);
 
-          for (var element in elements) {
-            for (String attr in attributes) {
-              final videoSrc = element.attributes[attr];
-              if (videoSrc != null && videoSrc.isNotEmpty) {
-                debugPrint('Found video URL in attribute $attr: $videoSrc');
-                return videoSrc;
-              }
+            EpisodeStreamOption selectedStream;
+            if (wantsDub) {
+              selectedStream = streamOptions.firstWhere(
+                (s) => s.isDubbed,
+                orElse: () => streamOptions.firstWhere(
+                  (s) => s.isSubbed,
+                  orElse: () => streamOptions.first,
+                ),
+              );
+            } else if (prefAudioLower.contains('leg')) {
+              selectedStream = streamOptions.firstWhere(
+                (s) => s.isSubbed,
+                orElse: () => streamOptions.firstWhere(
+                  (s) => s.isDubbed,
+                  orElse: () => streamOptions.first,
+                ),
+              );
+            } else {
+              // Default preferência: Dublado se disponível, senão legendado
+              selectedStream = streamOptions.firstWhere(
+                (s) => s.isDubbed,
+                orElse: () => streamOptions.firstWhere(
+                  (s) => s.isSubbed,
+                  orElse: () => streamOptions.first,
+                ),
+              );
+            }
+
+            debugPrint(
+              '[AnimeFire] Selected stream (${selectedStream.audio}): ${selectedStream.url} '
+              '(Total streams available: ${streamOptions.length})',
+            );
+
+            return EpisodeStreamResult(
+              primaryUrl: selectedStream.url,
+              availableStreams: streamOptions,
+              currentAudio: selectedStream.audio,
+            );
+          } else {
+            final isAllOffline = streamList.isNotEmpty &&
+                streamList.every(
+                  (s) =>
+                      s['is_offline'] == true ||
+                      s['url'] == null ||
+                      s['url'].toString().trim().isEmpty,
+                );
+            if (isAllOffline) {
+              throw Exception(
+                'Este episódio está temporariamente indisponível no servidor do AnimeFire.',
+              );
+            }
+          }
+        }
+        throw Exception(
+          'Nenhum stream de vídeo disponível no AnimeFire para este episódio no momento.',
+        );
+      }
+
+      final singleUrl = await _extractVideoUrlFromHtml(resolvedEpisodeUrl);
+      return EpisodeStreamResult(
+        primaryUrl: singleUrl,
+        availableStreams: [EpisodeStreamOption(url: singleUrl, audio: 'padrao')],
+        currentAudio: 'padrao',
+      );
+    } catch (e) {
+      throw Exception('Error extracting video stream: $e');
+    }
+  }
+
+  static Future<String> extractVideoURL(
+    String episodeUrl, {
+    String? animeTitle,
+    String? preferredAudio,
+  }) async {
+    final result = await getEpisodeStreams(
+      episodeUrl,
+      animeTitle: animeTitle,
+      preferredAudio: preferredAudio,
+    );
+    return result.primaryUrl;
+  }
+
+  static Future<String> _extractVideoUrlFromHtml(String pageUrl) async {
+    final response = await http.get(
+      Uri.parse(pageUrl),
+      headers: _buildRequestHeaders(referer: baseSiteUrl),
+    );
+    if (response.statusCode != 200) {
+      throw Exception('Failed to get video page: ${response.statusCode}');
+    }
+
+    final document = html_parser.parse(response.body);
+
+    final selectors = [
+      'video',
+      'div[data-video-src]',
+      'div[data-src]',
+      'div[data-url]',
+      'div[data-video]',
+      'div[data-player]',
+      'iframe[src*="video"]',
+      'iframe[src*="player"]',
+    ];
+
+    for (String selector in selectors) {
+      final elements = document.querySelectorAll(selector);
+      if (elements.isNotEmpty) {
+        final attributes = [
+          'data-video-src',
+          'data-src',
+          'data-url',
+          'data-video',
+          'src',
+        ];
+
+        for (var element in elements) {
+          for (String attr in attributes) {
+            final videoSrc = element.attributes[attr];
+            if (videoSrc != null && videoSrc.isNotEmpty) {
+              return videoSrc;
             }
           }
         }
       }
-
-      // If no video element found, try to find in page content
-      debugPrint('No video elements found, searching in page content');
-
-      // Try to find blogger link
-      final bloggerLink = _findBloggerLink(response.body);
-      if (bloggerLink.isNotEmpty) {
-        debugPrint('Found blogger link: $bloggerLink');
-        return bloggerLink;
-      }
-
-      // Try to find direct video URL in content
-      final videoUrlPattern = RegExp(
-        r'''https?://[^\s<>"']+?\.(?:mp4|m3u8)(?:\?[^\s<>"']*)?''',
-      );
-      final match = videoUrlPattern.firstMatch(response.body);
-      if (match != null) {
-        final directUrl = match.group(0)!;
-        debugPrint('Found direct video URL: $directUrl');
-        return directUrl;
-      }
-
-      throw Exception('No video source found in the page');
-    } catch (e) {
-      throw Exception('Error extracting video URL: $e');
     }
+
+    final bloggerLink = _findBloggerLink(response.body);
+    if (bloggerLink.isNotEmpty) {
+      return bloggerLink;
+    }
+
+    final videoUrlPattern = RegExp(
+      r'''https?://[^\s<>"']+?\.(?:mp4|m3u8)(?:\?[^\s<>"']*)?''',
+    );
+    final match = videoUrlPattern.firstMatch(response.body);
+    if (match != null) {
+      return match.group(0)!;
+    }
+
+    throw Exception('No video source found in the page');
   }
 
   static Future<VideoStreamResult> extractActualVideoURL(
@@ -1210,6 +1902,18 @@ class AnimeService {
       return _mergeVideoStreamResult(googleResult, baseHeaders);
     }
 
+    if (url.contains('akumast.net') || url.contains('.jpg')) {
+      baseHeaders.putIfAbsent('Referer', () => 'https://animefire.one/');
+      baseHeaders.putIfAbsent('Origin', () => 'https://animefire.one');
+      baseHeaders.putIfAbsent(
+        'User-Agent',
+        () =>
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      );
+      return VideoStreamResult(url: url, headers: baseHeaders);
+    }
+
     return _mergeVideoStreamResult(VideoStreamResult(url: url), baseHeaders);
   }
 
@@ -1233,6 +1937,9 @@ class AnimeService {
     return url.startsWith('http') &&
         (url.contains('.mp4') ||
             url.contains('.m3u8') ||
+            url.contains('.mpd') ||
+            url.contains('akumast.net') ||
+            url.contains('/m.jpg') ||
             url.contains('googlevideo.com') ||
             url.contains('videoplayback') ||
             url.contains('googleusercontent.com'));
@@ -1657,7 +2364,7 @@ class _AnimeSearchScreenState extends State<AnimeSearchScreen> {
           child: TextField(
             controller: _searchController,
             decoration: InputDecoration(
-              hintText: 'Buscar por título, saga ou estúdio...',
+              hintText: 'Buscar por tÃ­tulo, saga ou estÃºdio...',
               border: InputBorder.none,
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: 20,
@@ -1725,7 +2432,7 @@ class _AnimeSearchScreenState extends State<AnimeSearchScreen> {
           children: const [
             CircularProgressIndicator(),
             SizedBox(height: 16),
-            Text('Procurando pelos melhores episódios...'),
+            Text('Procurando pelos melhores episÃ³dios...'),
           ],
         ),
       ),
@@ -1749,14 +2456,14 @@ class _AnimeSearchScreenState extends State<AnimeSearchScreen> {
           Icon(Icons.airplay_rounded, size: 64, color: colorScheme.primary),
           const SizedBox(height: 16),
           Text(
-            'Explore o catálogo',
+            'Explore o catÃ¡logo',
             style: theme.textTheme.titleMedium?.copyWith(
               fontWeight: FontWeight.w700,
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            'Pesquise por títulos populares, gêneros ou utilize sua lista de favoritos.',
+            'Pesquise por tÃ­tulos populares, gÃªneros ou utilize sua lista de favoritos.',
             textAlign: TextAlign.center,
             style: theme.textTheme.bodyMedium?.copyWith(
               color: theme.textTheme.bodyMedium?.color?.withValues(alpha: 0.7),
@@ -1788,7 +2495,7 @@ class _AnimeSearchScreenState extends State<AnimeSearchScreen> {
           ),
           const SizedBox(height: 16),
           Text(
-            'Não foi possível concluir sua busca',
+            'NÃ£o foi possÃ­vel concluir sua busca',
             style: theme.textTheme.titleMedium?.copyWith(
               fontWeight: FontWeight.w700,
               color: colorScheme.onErrorContainer,
@@ -1945,7 +2652,7 @@ class _AnimeSearchScreenState extends State<AnimeSearchScreen> {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'Pesquise por títulos, sagas ou estúdios para encontrar seu anime.',
+                    'Pesquise por tÃ­tulos, sagas ou estÃºdios para encontrar seu anime.',
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: theme.colorScheme.onSurface.withValues(
                         alpha: 0.72,
@@ -2169,7 +2876,7 @@ class _AnimeResultCard extends StatelessWidget {
                       ),
                     ] else
                       Text(
-                        'Toque para ver episódios',
+                        'Toque para ver episÃ³dios',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.textTheme.bodySmall?.color?.withValues(
                             alpha: 0.72,
@@ -2333,7 +3040,7 @@ class AnimeDetailScreen extends StatelessWidget {
             ),
           ),
 
-          // Conteúdo Principal
+          // ConteÃºdo Principal
           SliverToBoxAdapter(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -2445,13 +3152,13 @@ class AnimeDetailScreen extends StatelessWidget {
                               ),
                             const SizedBox(height: 10),
 
-                            // Informações secundárias
+                            // InformaÃ§Ãµes secundÃ¡rias
                             _buildInfoRow(
                               context,
                               Icons.movie_filter_rounded,
                               anime.episodeCount != null
                                   ? '${anime.episodeCount} eps'
-                                  : 'Episódios variados',
+                                  : 'EpisÃ³dios variados',
                             ),
                             if (anime.status != null) ...[
                               const SizedBox(height: 5),
@@ -2476,7 +3183,7 @@ class AnimeDetailScreen extends StatelessWidget {
                   ),
                 ),
 
-                // Botão "Assistir Episódios"
+                // BotÃ£o "Assistir EpisÃ³dios"
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: SizedBox(
@@ -2494,7 +3201,7 @@ class AnimeDetailScreen extends StatelessWidget {
                       },
                       icon: const Icon(Icons.play_arrow_rounded, size: 20),
                       label: const Text(
-                        'Assistir Episódios',
+                        'Assistir EpisÃ³dios',
                         style: TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.bold,
@@ -2512,7 +3219,7 @@ class AnimeDetailScreen extends StatelessWidget {
 
                 const SizedBox(height: 20),
 
-                // Gêneros
+                // GÃªneros
                 if (anime.genres.isNotEmpty) ...[
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -2520,7 +3227,7 @@ class AnimeDetailScreen extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Gêneros',
+                          'GÃªneros',
                           style: theme.textTheme.titleMedium?.copyWith(
                             fontWeight: FontWeight.bold,
                             fontSize: 16,
@@ -2562,7 +3269,7 @@ class AnimeDetailScreen extends StatelessWidget {
                   const SizedBox(height: 20),
                 ],
 
-                // Descrição/Sinopse
+                // DescriÃ§Ã£o/Sinopse
                 if (hasDescription) ...[
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -2601,7 +3308,7 @@ class AnimeDetailScreen extends StatelessWidget {
                   const SizedBox(height: 20),
                 ],
 
-                // Informações Adicionais
+                // InformaÃ§Ãµes Adicionais
                 if (anime.aniListData != null) ...[
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -2609,7 +3316,7 @@ class AnimeDetailScreen extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Informações',
+                          'InformaÃ§Ãµes',
                           style: theme.textTheme.titleMedium?.copyWith(
                             fontWeight: FontWeight.bold,
                             fontSize: 16,
@@ -2755,9 +3462,9 @@ class AnimeDetailScreen extends StatelessWidget {
       case 'FINISHED':
         return 'Finalizado';
       case 'RELEASING':
-        return 'Em Lançamento';
+        return 'Em LanÃ§amento';
       case 'NOT_YET_RELEASED':
-        return 'Não Lançado';
+        return 'NÃ£o LanÃ§ado';
       case 'CANCELLED':
         return 'Cancelado';
       case 'HIATUS':
@@ -2774,7 +3481,7 @@ class AnimeDetailScreen extends StatelessWidget {
       case 'SPRING':
         return 'Primavera';
       case 'SUMMER':
-        return 'Verão';
+        return 'VerÃ£o';
       case 'FALL':
         return 'Outono';
       default:
@@ -3081,7 +3788,7 @@ class _EpisodeListScreenState extends State<EpisodeListScreen> {
                               )
                             else
                               Text(
-                                'Episódios disponíveis',
+                                'EpisÃ³dios disponÃ­veis',
                                 style: Theme.of(context).textTheme.bodySmall
                                     ?.copyWith(
                                       color: Colors.white.withValues(
@@ -3141,7 +3848,7 @@ class _EpisodeListScreenState extends State<EpisodeListScreen> {
           ),
           SizedBox(width: 12),
           Text(
-            'Carregando episódios...',
+            'Carregando episÃ³dios...',
             style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
           ),
         ],
@@ -3169,7 +3876,7 @@ class _EpisodeListScreenState extends State<EpisodeListScreen> {
           ),
           const SizedBox(height: 16),
           Text(
-            'Erro ao carregar episódios',
+            'Erro ao carregar episÃ³dios',
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
               fontWeight: FontWeight.w700,
               color: colorScheme.onErrorContainer,
@@ -3225,7 +3932,7 @@ class _EpisodeListScreenState extends State<EpisodeListScreen> {
           Icon(Icons.tv_off_rounded, size: 48, color: colorScheme.primary),
           const SizedBox(height: 12),
           Text(
-            'Nenhum episódio disponível',
+            'Nenhum episÃ³dio disponÃ­vel',
             style: theme.textTheme.titleSmall?.copyWith(
               fontWeight: FontWeight.bold,
               fontSize: 15,
@@ -3234,7 +3941,7 @@ class _EpisodeListScreenState extends State<EpisodeListScreen> {
           ),
           const SizedBox(height: 6),
           Text(
-            'Volte mais tarde para novas atualizações.',
+            'Volte mais tarde para novas atualizaÃ§Ãµes.',
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.textTheme.bodySmall?.color?.withValues(alpha: 0.75),
               fontSize: 13,
@@ -3268,7 +3975,7 @@ class _EpisodeListScreenState extends State<EpisodeListScreen> {
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              '${_episodes.length} episódio${_episodes.length == 1 ? '' : 's'}',
+              '${_episodes.length} episÃ³dio${_episodes.length == 1 ? '' : 's'}',
               style: theme.textTheme.titleSmall?.copyWith(
                 fontWeight: FontWeight.bold,
                 fontSize: 14,
@@ -3327,7 +4034,7 @@ class _EpisodeCard extends StatelessWidget {
     final colorScheme = theme.colorScheme;
     final displayTitle = episode.number.toLowerCase().contains('epis')
         ? episode.number
-        : 'Episódio ${episode.number}';
+        : 'EpisÃ³dio ${episode.number}';
 
     return InkWell(
       onTap: onTap,
@@ -3447,8 +4154,9 @@ class BloggerWebViewScreen extends StatefulWidget {
 
 class _BloggerWebViewScreenState extends State<BloggerWebViewScreen> {
   WebViewController? _webViewController;
-  VideoPlayerController? _videoController;
-  ChewieController? _chewieController;
+  Player? _mediaKitPlayer;
+  VideoController? _mediaKitVideoController;
+  BetterPlayerController? _betterPlayerController;
   GoogleVideoProxy? _streamProxy;
   bool _isDirectPlayer = false;
   bool _isPreparingVideo = true;
@@ -3458,6 +4166,7 @@ class _BloggerWebViewScreenState extends State<BloggerWebViewScreen> {
   @override
   void initState() {
     super.initState();
+    PlaybackWakeLock.acquire();
     _isDirectPlayer = _isDirectVideoUrl(widget.initialUrl);
     if (_isDirectPlayer) {
       _initializeDirectPlayer();
@@ -3477,19 +4186,25 @@ class _BloggerWebViewScreenState extends State<BloggerWebViewScreen> {
       ..setNavigationDelegate(
         NavigationDelegate(
           onProgress: (int progress) {
-            setState(() {
-              _progress = progress / 100.0;
-            });
+            if (mounted) {
+              setState(() {
+                _progress = progress / 100.0;
+              });
+            }
           },
           onPageStarted: (_) {
-            setState(() {
-              _progress = 0;
-            });
+            if (mounted) {
+              setState(() {
+                _progress = 0;
+              });
+            }
           },
           onPageFinished: (_) {
-            setState(() {
-              _progress = 1;
-            });
+            if (mounted) {
+              setState(() {
+                _progress = 1;
+              });
+            }
           },
           onNavigationRequest: (navigation) {
             return NavigationDecision.navigate;
@@ -3508,8 +4223,12 @@ class _BloggerWebViewScreenState extends State<BloggerWebViewScreen> {
     });
 
     try {
-      await _videoController?.dispose();
-      _chewieController?.dispose();
+      final oldMediaKitPlayer = _mediaKitPlayer;
+      _mediaKitPlayer = null;
+      _mediaKitVideoController = null;
+      await oldMediaKitPlayer?.dispose();
+      _betterPlayerController?.dispose();
+      _betterPlayerController = null;
       await _streamProxy?.stop();
       _streamProxy = null;
 
@@ -3528,26 +4247,41 @@ class _BloggerWebViewScreenState extends State<BloggerWebViewScreen> {
         playbackHeaders = const {};
       }
 
-      final controller = VideoPlayerController.networkUrl(
-        Uri.parse(playbackUrl),
-        httpHeaders: playbackHeaders,
-      );
-      _videoController = controller;
-      await controller.initialize();
+      if (_usesMediaKitDirectPlayer) {
+        _mediaKitPlayer = Player();
+        _mediaKitVideoController = VideoController(_mediaKitPlayer!);
+        _mediaKitPlayer!.stream.error.listen((error) {
+          debugPrint('[AlternativePlayer] MediaKit error: $error');
+          if (mounted) {
+            setState(() {
+              _videoError = 'Erro no player nativo: $error';
+              _isPreparingVideo = false;
+            });
+          }
+        });
+        await _mediaKitPlayer!.open(
+          Media(playbackUrl, httpHeaders: playbackHeaders),
+          play: true,
+        );
+      } else {
+        final dataSource = BetterPlayerDataSource(
+          BetterPlayerDataSourceType.network,
+          playbackUrl,
+          headers: playbackHeaders,
+        );
+        _betterPlayerController = BetterPlayerController(
+          const BetterPlayerConfiguration(
+            autoPlay: true,
+            looping: false,
+            allowedScreenSleep: false,
+            fit: BoxFit.contain,
+            handleLifecycle: true,
+          ),
+          betterPlayerDataSource: dataSource,
+        );
+      }
 
       if (!mounted) return;
-
-      _chewieController = ChewieController(
-        videoPlayerController: controller,
-        autoPlay: true,
-        looping: false,
-        allowFullScreen: true,
-        allowMuting: true,
-        showControls: true,
-        errorBuilder: (context, errorMessage) {
-          return _buildDirectError(errorMessage);
-        },
-      );
 
       setState(() {
         _isPreparingVideo = false;
@@ -3578,6 +4312,9 @@ class _BloggerWebViewScreenState extends State<BloggerWebViewScreen> {
     return headers;
   }
 
+  bool get _usesMediaKitDirectPlayer =>
+      Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+
   bool _isDirectVideoUrl(String url) {
     final lower = url.toLowerCase();
     return lower.contains('.mp4') ||
@@ -3589,8 +4326,9 @@ class _BloggerWebViewScreenState extends State<BloggerWebViewScreen> {
 
   @override
   void dispose() {
-    _videoController?.dispose();
-    _chewieController?.dispose();
+    PlaybackWakeLock.release();
+    _mediaKitPlayer?.dispose();
+    _betterPlayerController?.dispose();
     _streamProxy?.stop();
     super.dispose();
   }
@@ -3619,7 +4357,9 @@ class _BloggerWebViewScreenState extends State<BloggerWebViewScreen> {
           Expanded(
             child: _isDirectPlayer
                 ? _buildDirectPlayerBody()
-                : WebViewWidget(controller: _webViewController!),
+                : (_webViewController != null
+                      ? WebViewWidget(controller: _webViewController!)
+                      : const SizedBox.shrink()),
           ),
         ],
       ),
@@ -3633,20 +4373,30 @@ class _BloggerWebViewScreenState extends State<BloggerWebViewScreen> {
       );
     }
 
-    if (_videoError != null || _chewieController == null) {
+    if (_videoError != null ||
+        (_usesMediaKitDirectPlayer &&
+            (_mediaKitPlayer == null || _mediaKitVideoController == null)) ||
+        (!_usesMediaKitDirectPlayer && _betterPlayerController == null)) {
       return _buildDirectError(
         _videoError ?? 'Nao foi possivel abrir o video.',
       );
+    }
+
+    if (!_usesMediaKitDirectPlayer) {
+      return BetterPlayer(controller: _betterPlayerController!);
     }
 
     return Container(
       color: Colors.black,
       alignment: Alignment.center,
       child: AspectRatio(
-        aspectRatio: _videoController!.value.aspectRatio == 0
-            ? 16 / 9
-            : _videoController!.value.aspectRatio,
-        child: Chewie(controller: _chewieController!),
+        aspectRatio: 16 / 9,
+        child: DesktopVideoPlayer(
+          player: _mediaKitPlayer!,
+          controller: _mediaKitVideoController!,
+          title: widget.title,
+          onBack: () => Navigator.pop(context),
+        ),
       ),
     );
   }

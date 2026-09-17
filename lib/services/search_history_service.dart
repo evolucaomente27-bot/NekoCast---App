@@ -8,14 +8,17 @@ class SearchHistoryService {
 
   /// Salva uma busca no histórico
   static Future<void> saveSearch(String query) async {
-    if (query.trim().isEmpty) return;
+    final cleaned = query.trim();
+    if (cleaned.isEmpty) return;
     
     final prefs = await SharedPreferences.getInstance();
     final history = await getSearchHistory();
     
     // Remove duplicatas e adiciona no início
-    history.remove(query.trim());
-    history.insert(0, query.trim());
+    // Treat differently-cased copies as the same search while preserving the
+    // exact wording the user entered most recently.
+    history.removeWhere((item) => item.toLowerCase() == cleaned.toLowerCase());
+    history.insert(0, cleaned);
     
     // Limita o tamanho do histórico
     if (history.length > _maxHistoryItems) {
@@ -46,7 +49,7 @@ class SearchHistoryService {
     final prefs = await SharedPreferences.getInstance();
     final history = await getSearchHistory();
     
-    history.remove(query);
+    history.removeWhere((item) => item == query);
     await prefs.setString(_historyKey, jsonEncode(history));
   }
 
@@ -61,7 +64,7 @@ class SearchHistoryService {
     if (query.trim().isEmpty) return [];
     
     final history = await getSearchHistory();
-    final lowerQuery = query.toLowerCase();
+    final lowerQuery = query.trim().toLowerCase();
     
     return history
         .where((item) => item.toLowerCase().contains(lowerQuery))

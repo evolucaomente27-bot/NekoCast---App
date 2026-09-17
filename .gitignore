@@ -48,3 +48,15 @@ app.*.map.json
 
 #Ignore vscode AI rules
 .github/instructions/codacy.instructions.md
+
+# Application binaries
+*.apk
+*.zip
+*.mp4
+
+# Web node_modules and builds
+node_modules/
+**/node_modules/
+site/dist/
+site/dist-ssr/
+

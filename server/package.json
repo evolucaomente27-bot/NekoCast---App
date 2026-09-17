@@ -1,0 +1,22 @@
+{
+  "name": "nekocast-backend",
+  "version": "1.0.0",
+  "description": "NekoCast Lightweight Express Backend for Discloud",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@consumet/extensions": "^1.8.8",
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "puppeteer-core": "^25.5.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

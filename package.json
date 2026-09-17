@@ -1,0 +1,10 @@
+{
+  "name": "nekocast",
+  "version": "1.0.5",
+  "description": "NekoCast - Portal e Sistema Web de Animes e Mangás (Serverless)",
+  "scripts": {
+    "build": "npm --prefix site run build",
+    "dev": "npm --prefix site run dev",
+    "preview": "npm --prefix site run preview"
+  }
+}

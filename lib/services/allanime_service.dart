@@ -6,23 +6,51 @@ import 'package:http/http.dart' as http;
 class AllAnimeService {
   static const String _allAnimeReferer = 'https://allanime.to';
   static const String _allAnimeBase = 'allanime.day';
-  static const String _allAnimeAPI = 'https://api.allanime.day/api';
+  static const List<String> _allAnimeAPIs = [
+    'https://api.allanime.day/api',
+  ];
   static const String _userAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0';
 
-  /// Busca animes no AllAnime
+  /// Busca animes no AllAnime (Sub e Dub)
   static Future<AllAnimeSearchResponse?> searchAnime(String query) async {
-    final subResponse = await _searchAnimeWithTranslation(query, 'sub');
-    if (subResponse != null && subResponse.shows.isNotEmpty) {
-      return subResponse;
+    final results = await Future.wait([
+      _searchAnimeWithTranslation(query, 'sub'),
+      _searchAnimeWithTranslation(query, 'dub'),
+    ]);
+
+    final subResponse = results[0];
+    final dubResponse = results[1];
+
+    final Map<String, AllAnimeShow> merged = {};
+    if (subResponse != null) {
+      for (final show in subResponse.shows) {
+        merged[show.id] = show;
+      }
+    }
+    if (dubResponse != null) {
+      for (final show in dubResponse.shows) {
+        if (!merged.containsKey(show.id)) {
+          merged[show.id] = show;
+        } else {
+          final existing = merged[show.id]!;
+          final combinedEpMap = Map<String, dynamic>.from(existing.availableEpisodes ?? {});
+          if (show.availableEpisodes != null) {
+            combinedEpMap.addAll(show.availableEpisodes!);
+          }
+          merged[show.id] = AllAnimeShow(
+            id: existing.id,
+            name: existing.name,
+            englishName: existing.englishName,
+            availableEpisodes: combinedEpMap,
+            thumbnail: existing.thumbnail ?? show.thumbnail,
+          );
+        }
+      }
     }
 
-    final dubResponse = await _searchAnimeWithTranslation(query, 'dub');
-    if (dubResponse != null && dubResponse.shows.isNotEmpty) {
-      return dubResponse;
-    }
-
-    return subResponse ?? dubResponse;
+    if (merged.isEmpty) return null;
+    return AllAnimeSearchResponse(shows: merged.values.toList());
   }
 
   static Future<AllAnimeSearchResponse?> _searchAnimeWithTranslation(
@@ -58,31 +86,38 @@ class AllAnimeService {
       };
 
       final variablesJson = jsonEncode(variables);
-      final url = Uri.parse(
-        '$_allAnimeAPI?variables=${Uri.encodeComponent(variablesJson)}&query=${Uri.encodeComponent(searchGql)}',
-      );
 
-      final response = await http
-          .get(
-            url,
-            headers: {'User-Agent': _userAgent, 'Referer': _allAnimeReferer},
-          )
-          .timeout(const Duration(seconds: 10));
+      for (final apiBase in _allAnimeAPIs) {
+        try {
+          final url = Uri.parse(
+            '$apiBase?variables=${Uri.encodeComponent(variablesJson)}&query=${Uri.encodeComponent(searchGql)}',
+          );
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        debugPrint(
-          '[AllAnime] Found ${data['data']?['shows']?['edges']?.length ?? 0} results',
-        );
-        return AllAnimeSearchResponse.fromJson(data);
-      } else {
-        debugPrint('[AllAnime] Error: ${response.statusCode}');
-        return null;
+          final response = await http
+              .get(
+                url,
+                headers: {'User-Agent': _userAgent, 'Referer': _allAnimeReferer},
+              )
+              .timeout(const Duration(seconds: 8));
+
+          if (response.statusCode == 200 && response.body.trim().startsWith('{')) {
+            final data = jsonDecode(response.body);
+            final showsData = data['data']?['shows']?['edges'] as List?;
+            if (showsData != null) {
+              final shows = showsData
+                  .map((e) => AllAnimeShow.fromJson(e as Map<String, dynamic>))
+                  .toList();
+              return AllAnimeSearchResponse(shows: shows);
+            }
+          }
+        } catch (e) {
+          debugPrint('[AllAnime] Search error on $apiBase: $e');
+        }
       }
     } catch (e) {
       debugPrint('[AllAnime] Search error: $e');
-      return null;
     }
+    return null;
   }
 
   /// Busca lista detalhada de episódios com thumbnails
@@ -132,86 +167,65 @@ class AllAnimeService {
       ''';
 
       final variables = jsonEncode({'showId': animeId});
-      final url = Uri.parse(
-        '$_allAnimeAPI?variables=${Uri.encodeComponent(variables)}&query=${Uri.encodeComponent(episodesDetailGql)}',
-      );
-
-      final response = await http
-          .get(
-            url,
-            headers: {'User-Agent': _userAgent, 'Referer': _allAnimeReferer},
-          )
-          .timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final show = data['data']?['show'];
-
-        if (show != null) {
-          final episodeInfos = show['episodeInfos'] as List? ?? [];
-          final availableDetail = show['availableEpisodesDetail'];
-          final fallbackThumbnail = showThumbnail ?? show['thumbnail'];
-
-          // Get available episodes for the mode
-          List<String> availableEpisodes = [];
-          if (availableDetail != null && availableDetail[mode] != null) {
-            availableEpisodes = List<String>.from(availableDetail[mode]);
-          }
-
-          debugPrint(
-            '[AllAnime] Processing ${availableEpisodes.length} episodes',
+      
+      for (final apiBase in _allAnimeAPIs) {
+        try {
+          final url = Uri.parse(
+            '$apiBase?variables=${Uri.encodeComponent(variables)}&query=${Uri.encodeComponent(episodesDetailGql)}',
           );
-          debugPrint('[AllAnime] Fallback thumbnail: $fallbackThumbnail');
 
-          // Map episode infos with available episodes
-          List<AllAnimeEpisode> episodes = [];
-          for (final episodeNum in availableEpisodes) {
-            // Find matching episode info
-            final episodeInfo = episodeInfos.firstWhere(
-              (info) => info['episodeIdNum']?.toString() == episodeNum,
-              orElse: () => <String, dynamic>{},
-            );
+          final response = await http
+              .get(
+                url,
+                headers: {'User-Agent': _userAgent, 'Referer': _allAnimeReferer},
+              )
+              .timeout(const Duration(seconds: 10));
 
-            // Try to get episode-specific thumbnail
-            String? episodeThumbnail;
-            if (episodeInfo.isNotEmpty) {
-              // Check for thumbnails array
-              if (episodeInfo['thumbnails'] != null &&
-                  episodeInfo['thumbnails'] is List) {
-                final thumbnails = episodeInfo['thumbnails'] as List;
-                if (thumbnails.isNotEmpty) {
-                  episodeThumbnail = thumbnails.first?.toString();
+          if (response.statusCode == 200 && response.body.trim().startsWith('{')) {
+            final data = jsonDecode(response.body);
+            final show = data['data']?['show'];
+
+            if (show != null) {
+              final episodeInfos = show['episodeInfos'] as List? ?? [];
+              final availableDetail = show['availableEpisodesDetail'];
+
+              if (availableDetail != null && availableDetail[mode] != null) {
+                final episodes = availableDetail[mode] as List;
+                final result = <AllAnimeEpisode>[];
+
+                for (var ep in episodes) {
+                  final epString = ep.toString();
+                  // Encontrar detalhes correspondentes no episodeInfos
+                  Map<String, dynamic>? epInfo;
+                  try {
+                    epInfo = episodeInfos.firstWhere(
+                      (info) => info['episodeIdNum']?.toString() == epString,
+                    );
+                  } catch (_) {}
+
+                  result.add(
+                    AllAnimeEpisode(
+                      episodeNumber: epString,
+                      thumbnail: epInfo?['thumbnails']?.first ?? showThumbnail,
+                      title: epInfo?['notes'] ?? 'Episódio $epString',
+                      description: epInfo?['description'],
+                    ),
+                  );
                 }
+                
+                result.sort((a, b) {
+                  final numA = double.tryParse(a.episodeNumber) ?? 0;
+                  final numB = double.tryParse(b.episodeNumber) ?? 0;
+                  return numB.compareTo(numA);
+                });
+
+                return result;
               }
-              // Fallback to single thumbnail field
-              episodeThumbnail ??= episodeInfo['thumbnail']?.toString();
-            }
-
-            // Use show thumbnail as final fallback
-            final finalThumbnail = episodeThumbnail ?? fallbackThumbnail;
-
-            episodes.add(
-              AllAnimeEpisode(
-                episodeNumber: episodeNum,
-                thumbnail: finalThumbnail,
-                title: episodeInfo['notes'] ?? 'Episode $episodeNum',
-                description: episodeInfo['description'],
-              ),
-            );
-
-            if (episodes.length <= 3) {
-              debugPrint(
-                '[AllAnime] Episode $episodeNum thumbnail: $finalThumbnail',
-              );
             }
           }
-
-          debugPrint(
-            '[AllAnime] Found ${episodes.length} detailed episodes with thumbnails',
-          );
-          return episodes;
-        }
+        } catch (_) {}
       }
+
 
       debugPrint(
         '[AllAnime] Falling back to simple episode list with show thumbnail',
@@ -227,21 +241,7 @@ class AllAnimeService {
           .toList();
     } catch (e) {
       debugPrint('[AllAnime] Get detailed episodes error: $e');
-      // Return episodes with fallback thumbnail
-      try {
-        final simpleList = await getEpisodesList(animeId, mode: mode);
-        return simpleList
-            .map(
-              (episodeNum) => AllAnimeEpisode(
-                episodeNumber: episodeNum,
-                thumbnail: showThumbnail,
-              ),
-            )
-            .toList();
-      } catch (fallbackError) {
-        debugPrint('[AllAnime] Fallback also failed: $fallbackError');
-        return [];
-      }
+      return [];
     }
   }
 
@@ -280,33 +280,38 @@ class AllAnimeService {
       ''';
 
       final variables = jsonEncode({'showId': animeId});
-      final url = Uri.parse(
-        '$_allAnimeAPI?variables=${Uri.encodeComponent(variables)}&query=${Uri.encodeComponent(episodesListGql)}',
-      );
+      
+      for (final apiBase in _allAnimeAPIs) {
+        try {
+          final url = Uri.parse(
+            '$apiBase?variables=${Uri.encodeComponent(variables)}&query=${Uri.encodeComponent(episodesListGql)}',
+          );
 
-      final response = await http
-          .get(
-            url,
-            headers: {'User-Agent': _userAgent, 'Referer': _allAnimeReferer},
-          )
-          .timeout(const Duration(seconds: 10));
+          final response = await http
+              .get(
+                url,
+                headers: {'User-Agent': _userAgent, 'Referer': _allAnimeReferer},
+              )
+              .timeout(const Duration(seconds: 10));
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final availableEpisodesDetail =
-            data['data']?['show']?['availableEpisodesDetail'];
+          if (response.statusCode == 200 && response.body.trim().startsWith('{')) {
+            final data = jsonDecode(response.body);
+            final availableEpisodesDetail = data['data']?['show']?['availableEpisodesDetail'];
 
-        if (availableEpisodesDetail != null &&
-            availableEpisodesDetail[mode] != null) {
-          final episodes = List<String>.from(availableEpisodesDetail[mode]);
-          episodes.sort((a, b) {
-            final numA = double.tryParse(a) ?? 0;
-            final numB = double.tryParse(b) ?? 0;
-            return numA.compareTo(numB);
-          });
-          debugPrint('[AllAnime] Found ${episodes.length} episodes');
-          return episodes;
-        }
+            if (availableEpisodesDetail != null && availableEpisodesDetail[mode] != null) {
+              final episodes = List<String>.from(availableEpisodesDetail[mode]);
+              
+              episodes.sort((a, b) {
+                final numA = double.tryParse(a) ?? 0;
+                final numB = double.tryParse(b) ?? 0;
+                return numB.compareTo(numA);
+              });
+              
+              debugPrint('[AllAnime] Found ${episodes.length} episodes');
+              return episodes;
+            }
+          }
+        } catch (_) {}
       }
 
       debugPrint('[AllAnime] No episodes found');
@@ -442,31 +447,42 @@ class AllAnimeService {
         'episodeString': episodeNo,
       });
 
-      final url = Uri.parse(
-        '$_allAnimeAPI?variables=${Uri.encodeComponent(variables)}&query=${Uri.encodeComponent(episodeEmbedGQL)}',
-      );
+      for (final apiBase in _allAnimeAPIs) {
+        try {
+          final url = Uri.parse(
+            '$apiBase?variables=${Uri.encodeComponent(variables)}&query=${Uri.encodeComponent(episodeEmbedGQL)}',
+          );
 
-      final response = await http
-          .get(
-            url,
-            headers: {'User-Agent': _userAgent, 'Referer': _allAnimeReferer},
-          )
-          .timeout(const Duration(seconds: 15));
+          final response = await http
+              .get(
+                url,
+                headers: {'User-Agent': _userAgent, 'Referer': _allAnimeReferer},
+              )
+              .timeout(const Duration(seconds: 15));
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final sourceURLs = _extractSourceURLs(data);
+          if (response.statusCode == 200 && response.body.trim().startsWith('{')) {
+            final data = jsonDecode(response.body);
+            final sourceURLs = _extractSourceURLs(data);
 
-        if (sourceURLs.isNotEmpty) {
-          // Tentar obter o link de vídeo da primeira fonte
-          for (final sourceURL in sourceURLs) {
-            final videoURL = await _getVideoLink(sourceURL);
-            if (videoURL != null) {
-              debugPrint('[AllAnime] Found video URL: $videoURL');
-              return videoURL;
+            if (sourceURLs.isNotEmpty) {
+              // Tentar obter o link de vídeo da primeira fonte
+              for (final sourceURL in sourceURLs) {
+                final videoURL = await _getVideoLink(sourceURL);
+                if (videoURL != null && videoURL.isNotEmpty) {
+                  debugPrint('[AllAnime] Found video URL: $videoURL');
+                  return videoURL;
+                }
+              }
+              // Fallback: se nenhuma fonte retornou vídeo direto, usar a primeira URL HTTP válida
+              for (final sourceURL in sourceURLs) {
+                if (sourceURL.startsWith('http')) {
+                  debugPrint('[AllAnime] Fallback to raw source URL: $sourceURL');
+                  return sourceURL;
+                }
+              }
             }
           }
-        }
+        } catch (_) {}
       }
 
       debugPrint('[AllAnime] No video URL found');
@@ -480,51 +496,86 @@ class AllAnimeService {
   /// Extrai link de vídeo da URL de fonte
   static Future<String?> _getVideoLink(String sourceURL) async {
     try {
-      final response = await http
-          .get(
-            Uri.parse(sourceURL),
-            headers: {'User-Agent': _userAgent, 'Referer': _allAnimeReferer},
-          )
-          .timeout(const Duration(seconds: 10));
+      if (sourceURL.contains('.mp4') ||
+          sourceURL.contains('.m3u8') ||
+          sourceURL.contains('googlevideo.com') ||
+          sourceURL.contains('videoplayback')) {
+        return sourceURL;
+      }
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+      final mirrors = <String>{
+        sourceURL,
+        sourceURL.replaceAll('allanime.day', 'allanime.to'),
+        sourceURL.replaceAll('allanime.day', 'allani.me'),
+        sourceURL.replaceAll('allanime.day', 'allanime.co'),
+      };
 
-        // Buscar por links no formato JSON
-        if (data['links'] != null) {
-          final links = data['links'] as List;
-          final candidates = <String>[];
+      for (final urlCandidate in mirrors) {
+        try {
+          final response = await http
+              .get(
+                Uri.parse(urlCandidate),
+                headers: {'User-Agent': _userAgent, 'Referer': _allAnimeReferer},
+              )
+              .timeout(const Duration(seconds: 8));
 
-          void addCandidate(String? value) {
-            if (value == null || value.isEmpty) return;
-            final cleaned = value.replaceAll(r'\', '').trim();
-            if (cleaned.isEmpty) return;
-            if (!candidates.contains(cleaned)) {
-              candidates.add(
-                cleaned.startsWith('//') ? 'https:$cleaned' : cleaned,
-              );
+          if (response.statusCode == 200) {
+            // Tentar parse como JSON primeiro
+            try {
+              final data = jsonDecode(response.body);
+              if (data is Map && data['links'] != null) {
+                final links = data['links'] as List;
+                final candidates = <String>[];
+
+                void addCandidate(String? value) {
+                  if (value == null || value.isEmpty) return;
+                  final cleaned = value.replaceAll(r'\', '').trim();
+                  if (cleaned.isEmpty) return;
+                  if (!candidates.contains(cleaned)) {
+                    candidates.add(
+                      cleaned.startsWith('//') ? 'https:$cleaned' : cleaned,
+                    );
+                  }
+                }
+
+                for (final link in links) {
+                  if (link is! Map) continue;
+                  addCandidate(link['link'] as String?);
+                  addCandidate(link['file'] as String?);
+                  addCandidate(link['src'] as String?);
+                  addCandidate(link['hls'] as String?);
+                }
+
+                candidates.sort(
+                  (a, b) =>
+                      _scoreVideoCandidate(b).compareTo(_scoreVideoCandidate(a)),
+                );
+                if (candidates.isNotEmpty) {
+                  return candidates.first;
+                }
+              }
+            } catch (_) {
+              // Conteúdo não é JSON; tentar extrair links por expressão regular do corpo HTML
+            }
+
+            // Fallback: extrair URL direta .mp4 ou .m3u8 por regex do corpo
+            final mp4Regex = RegExp(
+              r'''https?://[^\s<>"']+?\.(?:mp4|m3u8)(?:\?[^\s<>"']*)?''',
+              caseSensitive: false,
+            );
+            final match = mp4Regex.firstMatch(response.body);
+            if (match != null) {
+              return match.group(0);
             }
           }
-
-          for (final link in links) {
-            if (link is! Map) continue;
-            addCandidate(link['link'] as String?);
-            addCandidate(link['file'] as String?);
-            addCandidate(link['src'] as String?);
-            addCandidate(link['hls'] as String?);
-          }
-
-          candidates.sort(
-            (a, b) =>
-                _scoreVideoCandidate(b).compareTo(_scoreVideoCandidate(a)),
-          );
-          if (candidates.isNotEmpty) {
-            return candidates.first;
-          }
-        }
+        } catch (_) {}
       }
     } catch (e) {
       debugPrint('[AllAnime] Get video link error: $e');
+    }
+
+    if (sourceURL.startsWith('http')) {
+      return sourceURL;
     }
     return null;
   }
@@ -582,13 +633,32 @@ class AllAnimeShow {
   String get displayName =>
       englishName?.isNotEmpty == true ? englishName! : name;
 
-  int get episodeCount {
+  int get subEpisodeCount {
     if (availableEpisodes != null) {
       final sub = availableEpisodes!['sub'];
       if (sub is num) return sub.toInt();
     }
     return 0;
   }
+
+  int get dubEpisodeCount {
+    if (availableEpisodes != null) {
+      final dub = availableEpisodes!['dub'];
+      if (dub is num) return dub.toInt();
+    }
+    return 0;
+  }
+
+  int get rawEpisodeCount {
+    if (availableEpisodes != null) {
+      final raw = availableEpisodes!['raw'];
+      if (raw is num) return raw.toInt();
+    }
+    return 0;
+  }
+
+  int get episodeCount =>
+      subEpisodeCount > 0 ? subEpisodeCount : (dubEpisodeCount > 0 ? dubEpisodeCount : rawEpisodeCount);
 }
 
 /// Episode information from AllAnime

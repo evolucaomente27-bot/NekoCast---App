@@ -6,6 +6,9 @@ class JikanAnime {
   final String? titleJapanese;
   final String imageUrl;
   final String? largImageUrl;
+  /// URLs de capa em ordem de preferência. A CDN pode falhar pontualmente
+  /// para uma das variantes, por isso a interface tenta as alternativas.
+  final List<String> coverImageUrls;
   final String? synopsis;
   final double? score;
   final int? episodes;
@@ -22,6 +25,7 @@ class JikanAnime {
     this.titleJapanese,
     required this.imageUrl,
     this.largImageUrl,
+    this.coverImageUrls = const [],
     this.synopsis,
     this.score,
     this.episodes,
@@ -32,12 +36,29 @@ class JikanAnime {
     this.season,
   });
 
+  List<String> get availableCoverImageUrls => {
+    ...coverImageUrls,
+    if (largImageUrl != null) largImageUrl!,
+    imageUrl,
+  }.where((url) => url.isNotEmpty).toList();
+
   factory JikanAnime.fromJson(Map<String, dynamic> json) {
     // Priorizar WebP para melhor qualidade e compressão
     final webpLarge = json['images']?['webp']?['large_image_url'];
     final jpgLarge = json['images']?['jpg']?['large_image_url'];
     final webpNormal = json['images']?['webp']?['image_url'];
     final jpgNormal = json['images']?['jpg']?['image_url'];
+
+    final coverImageUrls = <String>[
+      webpLarge,
+      jpgLarge,
+      webpNormal,
+      jpgNormal,
+    ]
+        .whereType<String>()
+        .where((url) => url.isNotEmpty)
+        .toSet()
+        .toList();
 
     return JikanAnime(
       malId: json['mal_id'] ?? 0,
@@ -46,6 +67,7 @@ class JikanAnime {
       titleJapanese: json['title_japanese'],
       imageUrl: webpNormal ?? jpgNormal ?? '',
       largImageUrl: webpLarge ?? jpgLarge ?? webpNormal ?? jpgNormal,
+      coverImageUrls: coverImageUrls,
       synopsis: json['synopsis'],
       score: json['score']?.toDouble(),
       episodes: json['episodes'],
@@ -68,7 +90,18 @@ class JikanAnime {
       'title_english': titleEnglish,
       'title_japanese': titleJapanese,
       'images': {
-        'jpg': {'image_url': imageUrl, 'large_image_url': largImageUrl},
+        // Persist every usable URL. This keeps the image fallbacks available
+        // when the home cache is restored without a network connection.
+        'jpg': {
+          'image_url': imageUrl,
+          'large_image_url': largImageUrl,
+        },
+        'webp': {
+          'image_url': coverImageUrls.length > 2 ? coverImageUrls[2] : imageUrl,
+          'large_image_url': coverImageUrls.isNotEmpty
+              ? coverImageUrls.first
+              : largImageUrl,
+        },
       },
       'synopsis': synopsis,
       'score': score,

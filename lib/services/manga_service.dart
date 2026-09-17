@@ -300,6 +300,56 @@ class MangaService extends ChangeNotifier {
         .trim();
   }
 
+  Future<List<MangaDownloadItem>> getDownloadedMangas() async {
+    try {
+      final mangaDir = await _getMangaDirectory();
+      if (!await mangaDir.exists()) return [];
+
+      final List<MangaDownloadItem> items = [];
+      final mangaFolders = mangaDir.listSync().whereType<Directory>();
+
+      for (final mDir in mangaFolders) {
+        final mangaName = path.basename(mDir.path).replaceAll('_', ' ');
+        final chapterFolders = mDir.listSync().whereType<Directory>();
+
+        for (final cDir in chapterFolders) {
+          final chapterName = path.basename(cDir.path).replaceAll('_', ' ');
+          final pages = cDir.listSync().whereType<File>().toList();
+          if (pages.isNotEmpty) {
+            items.add(
+              MangaDownloadItem(
+                id: '${mDir.path}_${cDir.path}',
+                mangaTitle: mangaName,
+                chapterTitle: chapterName,
+                directoryPath: cDir.path,
+                pageCount: pages.length,
+                completedAt: cDir.statSync().modified,
+              ),
+            );
+          }
+        }
+      }
+
+      items.sort((a, b) => b.completedAt.compareTo(a.completedAt));
+      return items;
+    } catch (e) {
+      debugPrint('[MangaService] Error reading downloaded mangas: $e');
+      return [];
+    }
+  }
+
+  Future<void> deleteDownloadedChapter(String directoryPath) async {
+    try {
+      final dir = Directory(directoryPath);
+      if (await dir.exists()) {
+        await dir.delete(recursive: true);
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('[MangaService] Error deleting chapter: $e');
+    }
+  }
+
   @override
   void dispose() {
     _client.close();

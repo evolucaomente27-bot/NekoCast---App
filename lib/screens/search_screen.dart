@@ -1,18 +1,27 @@
-import 'dart:async';
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../models/jikan_models.dart';
 import '../services/jikan_service.dart';
 import '../services/search_history_service.dart';
+import '../services/tv_mode_service.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_colors.dart';
 import '../utils/responsive.dart';
+import '../widgets/tv_focusable.dart';
+import '../main.dart';
 import 'source_selection_screen.dart';
 
 class SearchScreen extends StatefulWidget {
   final VoidCallback? onBackPressed;
+  final bool initialFilterDubbed;
 
-  const SearchScreen({super.key, this.onBackPressed});
+  const SearchScreen({
+    super.key,
+    this.onBackPressed,
+    this.initialFilterDubbed = false,
+  });
 
   @override
   State<SearchScreen> createState() => _SearchScreenState();
@@ -37,9 +46,11 @@ class _SearchScreenState extends State<SearchScreen>
   bool _isSearching = false;
   bool _showHistory = true;
   int _searchRequestId = 0;
+  String? _searchError;
 
   // Filtros
   int? _selectedGenre;
+  bool _filterDubbedOnly = false;
 
   List<Map<String, dynamic>> _getGenres() {
     final l10n = AppLocalizations.of(context);
@@ -112,6 +123,12 @@ class _SearchScreenState extends State<SearchScreen>
     _loadTrendingAnimes();
     _loadRecentSearches();
 
+    if (widget.initialFilterDubbed) {
+      _filterDubbedOnly = true;
+      _showHistory = false;
+      _performSearch('');
+    }
+
     _searchController.addListener(_onSearchChanged);
   }
 
@@ -130,10 +147,17 @@ class _SearchScreenState extends State<SearchScreen>
     final query = _searchController.text.trim();
 
     if (query.isEmpty) {
+      _searchRequestId++;
+      if (_filterDubbedOnly) {
+        _performSearch('');
+        return;
+      }
       setState(() {
         _showHistory = true;
         _suggestions = [];
         _searchResults = [];
+        _searchError = null;
+        _isSearching = false;
       });
       return;
     }
@@ -151,12 +175,14 @@ class _SearchScreenState extends State<SearchScreen>
 
   Future<void> _loadSearchHistory() async {
     final history = await SearchHistoryService.getSearchHistory();
-    setState(() => _searchHistory = history);
+    if (mounted) setState(() => _searchHistory = history);
   }
 
   Future<void> _loadSuggestions(String query) async {
     final suggestions = await SearchHistoryService.getSuggestions(query);
-    setState(() => _suggestions = suggestions);
+    if (mounted && _searchController.text.trim() == query) {
+      setState(() => _suggestions = suggestions);
+    }
   }
 
   Future<void> _loadTrendingAnimes() async {
@@ -205,49 +231,96 @@ class _SearchScreenState extends State<SearchScreen>
 
   Future<void> _performSearch(String query) async {
     final normalizedQuery = query.trim();
-    if (normalizedQuery.isEmpty) return;
+    if (normalizedQuery.isEmpty && _selectedGenre == null && !_filterDubbedOnly) return;
 
     final requestId = ++_searchRequestId;
 
-    setState(() => _isSearching = true);
+    setState(() {
+      _isSearching = true;
+      _searchError = null;
+      _showHistory = false;
+    });
 
     try {
       List<JikanAnime> results;
 
-      if (_selectedGenre != null) {
-        // Busca por gênero com termo
-        results = await _jikanService.searchAnimes(normalizedQuery, limit: 20);
-        results = results.where((anime) {
-          return anime.genres.any((genre) => genre.malId == _selectedGenre);
-        }).toList();
+      if (_filterDubbedOnly) {
+        final List<Anime> afAnimes;
+        if (normalizedQuery.isNotEmpty) {
+          afAnimes = await AnimeService.searchAnimeFireOnly('$normalizedQuery dublado');
+        } else {
+          afAnimes = await AnimeService.getDubbedAnimes();
+        }
+        results = afAnimes.map((af) => JikanAnime(
+          malId: 0,
+          title: af.name,
+          titleEnglish: af.name,
+          titleJapanese: af.name,
+          imageUrl: af.imageUrl,
+          largImageUrl: af.imageUrl,
+          score: null,
+          status: 'Dublado PT-BR',
+          synopsis: 'Disponível com dublagem brasileira no AnimeFire',
+          genres: [
+            JikanGenre(
+              malId: 0,
+              name: 'Dublado PT-BR',
+              type: 'genre',
+            ),
+          ],
+        )).toList();
+      } else if (normalizedQuery.isNotEmpty) {
+        results = await _jikanService.searchAnimes(
+          normalizedQuery,
+          limit: 20,
+          genreId: _selectedGenre,
+        );
+      } else if (_selectedGenre != null) {
+        results = await _jikanService.getAnimesByGenre(_selectedGenre!);
       } else {
-        // Busca normal
-        results = await _jikanService.searchAnimes(normalizedQuery, limit: 20);
+        results = [];
       }
 
       if (mounted && requestId == _searchRequestId) {
         setState(() {
           _searchResults = results;
           _isSearching = false;
+          _suggestions = [];
         });
       }
     } catch (e) {
       debugPrint('Error searching animes: $e');
       if (mounted && requestId == _searchRequestId) {
-        setState(() => _isSearching = false);
+        setState(() {
+          _isSearching = false;
+          _searchError = e.toString();
+        });
       }
     }
   }
 
   Future<void> _selectSearchQuery(String query) async {
-    _searchController.text = query;
+    final cleanedQuery = query.trim();
+    if (cleanedQuery.isEmpty) return;
+    _searchController.text = cleanedQuery;
     _searchFocusNode.unfocus();
 
     // Salva no histórico
-    await SearchHistoryService.saveSearch(query);
+    await SearchHistoryService.saveSearch(cleanedQuery);
     await _loadSearchHistory();
 
     // Realiza a busca
+    _performSearch(cleanedQuery);
+  }
+
+  Future<void> _submitSearch(String value) async {
+    final query = value.trim();
+    if (query.isEmpty && _selectedGenre == null && !_filterDubbedOnly) return;
+    _searchFocusNode.unfocus();
+    if (query.isNotEmpty) {
+      await SearchHistoryService.saveSearch(query);
+      await _loadSearchHistory();
+    }
     _performSearch(query);
   }
 
@@ -265,10 +338,18 @@ class _SearchScreenState extends State<SearchScreen>
   void _selectGenre(int? genreId) {
     setState(() {
       _selectedGenre = genreId;
+      if (genreId != null) {
+        _filterDubbedOnly = false;
+      }
     });
 
-    if (_searchController.text.isNotEmpty) {
+    if (_searchController.text.isNotEmpty || _selectedGenre != null || _filterDubbedOnly) {
       _performSearch(_searchController.text);
+    } else {
+      setState(() {
+        _showHistory = true;
+        _searchResults = [];
+      });
     }
   }
 
@@ -318,6 +399,8 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Widget _buildSearchHeader(bool canPop) {
+    final isTv = context.watch<TvModeService?>()?.isTvMode ?? false;
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -332,8 +415,7 @@ class _SearchScreenState extends State<SearchScreen>
           Row(
             children: [
               // Back button
-              IconButton(
-                icon: const Icon(Icons.arrow_back, color: Colors.white),
+              TvFocusable(
                 onPressed: () {
                   if (canPop) {
                     Navigator.pop(context);
@@ -341,6 +423,11 @@ class _SearchScreenState extends State<SearchScreen>
                     widget.onBackPressed!();
                   }
                 },
+                borderRadius: BorderRadius.circular(24),
+                child: const Padding(
+                  padding: EdgeInsets.all(8.0),
+                  child: Icon(Icons.arrow_back, color: Colors.white),
+                ),
               ),
               const SizedBox(width: 8),
 
@@ -358,7 +445,9 @@ class _SearchScreenState extends State<SearchScreen>
                   child: TextField(
                     controller: _searchController,
                     focusNode: _searchFocusNode,
-                    autofocus: true,
+                    autofocus: !isTv,
+                    textInputAction: TextInputAction.search,
+                    onSubmitted: _submitSearch,
                     style: const TextStyle(color: Colors.white, fontSize: 16),
                     decoration: InputDecoration(
                       hintText: 'Search animes...',
@@ -377,10 +466,6 @@ class _SearchScreenState extends State<SearchScreen>
                               ),
                               onPressed: () {
                                 _searchController.clear();
-                                setState(() {
-                                  _showHistory = true;
-                                  _searchResults = [];
-                                });
                               },
                             )
                           : null,
@@ -437,29 +522,64 @@ class _SearchScreenState extends State<SearchScreen>
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: genres.length + 1,
+        itemCount: genres.length + 2,
         itemBuilder: (context, index) {
           if (index == 0) {
+            final isAllSelected = _selectedGenre == null && !_filterDubbedOnly;
             return Padding(
               padding: const EdgeInsets.only(right: 8),
               child: FilterChip(
                 label: Text(l10n.allGenres),
                 labelStyle: TextStyle(
-                  color: _selectedGenre == null ? Colors.white : Colors.white70,
-                  fontWeight: _selectedGenre == null
+                  color: isAllSelected ? Colors.white : Colors.white70,
+                  fontWeight: isAllSelected
                       ? FontWeight.bold
                       : FontWeight.normal,
                 ),
-                selected: _selectedGenre == null,
+                selected: isAllSelected,
                 selectedColor: AppColors.primary,
                 backgroundColor: Colors.white.withValues(alpha: 0.1),
-                onSelected: (_) => _selectGenre(null),
+                onSelected: (_) {
+                  setState(() {
+                    _filterDubbedOnly = false;
+                    _selectedGenre = null;
+                  });
+                  _performSearch(_searchController.text);
+                },
               ),
             );
           }
 
-          final genre = genres[index - 1];
-          final isSelected = _selectedGenre == genre['id'];
+          if (index == 1) {
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilterChip(
+                avatar: const Text('🇧🇷', style: TextStyle(fontSize: 14)),
+                label: const Text('Dublados (PT-BR)'),
+                labelStyle: TextStyle(
+                  color: _filterDubbedOnly ? Colors.white : Colors.white70,
+                  fontWeight: _filterDubbedOnly
+                      ? FontWeight.bold
+                      : FontWeight.normal,
+                ),
+                selected: _filterDubbedOnly,
+                selectedColor: const Color(0xFF2E7D32),
+                backgroundColor: Colors.white.withValues(alpha: 0.1),
+                onSelected: (selected) {
+                  setState(() {
+                    _filterDubbedOnly = selected;
+                    if (selected) {
+                      _selectedGenre = null;
+                    }
+                  });
+                  _performSearch(_searchController.text);
+                },
+              ),
+            );
+          }
+
+          final genre = genres[index - 2];
+          final isSelected = _selectedGenre == genre['id'] && !_filterDubbedOnly;
 
           return Padding(
             padding: const EdgeInsets.only(right: 8),
@@ -494,7 +614,7 @@ class _SearchScreenState extends State<SearchScreen>
           _buildSectionHeader('Recent Searches', Icons.history),
           const SizedBox(height: 16),
           SizedBox(
-            height: 200,
+            height: 220,
             child: ListView.builder(
               scrollDirection: Axis.horizontal,
               itemCount: _recentSearchResults.length,
@@ -569,6 +689,35 @@ class _SearchScreenState extends State<SearchScreen>
       );
     }
 
+    if (_searchError != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.cloud_off_rounded,
+                size: 56,
+                color: AppColors.textTertiary,
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                'Não foi possível concluir a busca.',
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 16),
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: () => _performSearch(_searchController.text),
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Tentar novamente'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     if (_searchResults.isEmpty) {
       final l10n = AppLocalizations.of(context);
       return Center(
@@ -635,96 +784,116 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Widget _buildAnimeCard(JikanAnime anime) {
-    return GestureDetector(
-      onTap: () => _onAnimeTap(anime),
-      child: Container(
-        width: 130,
-        margin: const EdgeInsets.only(right: 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: Stack(
-                children: [
-                  CachedNetworkImage(
-                    imageUrl: anime.largImageUrl ?? anime.imageUrl,
-                    width: 130,
-                    height: 160,
-                    fit: BoxFit.cover,
-                    placeholder: (context, url) => Container(
-                      color: AppColors.surface,
-                      child: const Center(
-                        child: CircularProgressIndicator(
-                          color: AppColors.primary,
-                        ),
-                      ),
+    return Padding(
+      padding: const EdgeInsets.only(right: 12),
+      child: TvFocusable(
+        onPressed: () => _onAnimeTap(anime),
+        borderRadius: BorderRadius.circular(12),
+        child: SizedBox(
+          width: 130,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Stack(
+                  children: [
+                    _AnimeCover(
+                      imageUrls: anime.availableCoverImageUrls,
+                      width: 130,
+                      height: 155,
                     ),
-                    errorWidget: (context, url, error) => Container(
-                      color: AppColors.surface,
-                      child: const Icon(
-                        Icons.image_not_supported_outlined,
-                        color: Colors.white54,
-                      ),
-                    ),
-                  ),
-                  if (anime.score != null)
-                    Positioned(
-                      top: 6,
-                      right: 6,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.7),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(
-                              Icons.star,
-                              color: Colors.amber,
-                              size: 12,
-                            ),
-                            const SizedBox(width: 2),
-                            Text(
-                              anime.score!.toStringAsFixed(1),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
+                    if (anime.score != null)
+                      Positioned(
+                        top: 6,
+                        right: 6,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.7),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.star,
+                                color: Colors.amber,
+                                size: 12,
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: 2),
+                              Text(
+                                anime.score!.toStringAsFixed(1),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                ],
+                    if (anime.title.toLowerCase().contains('dublado') ||
+                        anime.genres.any((g) => g.name.toLowerCase().contains('dublado')))
+                      Positioned(
+                        top: 6,
+                        left: 6,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF2E7D32),
+                            borderRadius: BorderRadius.circular(6),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.4),
+                                blurRadius: 4,
+                              ),
+                            ],
+                          ),
+                          child: const Text(
+                            'DUB',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 9,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              anime.title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
+              const SizedBox(height: 6),
+              Text(
+                anime.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
   Widget _buildGridAnimeCard(JikanAnime anime) {
-    return GestureDetector(
-      onTap: () => _onAnimeTap(anime),
+    return TvFocusable(
+      onPressed: () => _onAnimeTap(anime),
+      borderRadius: BorderRadius.circular(12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -733,26 +902,10 @@ class _SearchScreenState extends State<SearchScreen>
               borderRadius: BorderRadius.circular(12),
               child: Stack(
                 children: [
-                  CachedNetworkImage(
-                    imageUrl: anime.largImageUrl ?? anime.imageUrl,
+                  _AnimeCover(
+                    imageUrls: anime.availableCoverImageUrls,
                     width: double.infinity,
                     height: double.infinity,
-                    fit: BoxFit.cover,
-                    placeholder: (context, url) => Container(
-                      color: AppColors.surface,
-                      child: const Center(
-                        child: CircularProgressIndicator(
-                          color: AppColors.primary,
-                        ),
-                      ),
-                    ),
-                    errorWidget: (context, url, error) => Container(
-                      color: AppColors.surface,
-                      child: const Icon(
-                        Icons.image_not_supported_outlined,
-                        color: Colors.white54,
-                      ),
-                    ),
                   ),
                   if (anime.score != null)
                     Positioned(
@@ -788,6 +941,37 @@ class _SearchScreenState extends State<SearchScreen>
                         ),
                       ),
                     ),
+                  if (anime.title.toLowerCase().contains('dublado') ||
+                      anime.genres.any((g) => g.name.toLowerCase().contains('dublado')))
+                    Positioned(
+                      top: 6,
+                      left: 6,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2E7D32),
+                          borderRadius: BorderRadius.circular(6),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.4),
+                              blurRadius: 4,
+                            ),
+                          ],
+                        ),
+                        child: const Text(
+                          'DUB',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -808,4 +992,67 @@ class _SearchScreenState extends State<SearchScreen>
       ),
     );
   }
+}
+
+class _AnimeCover extends StatefulWidget {
+  final List<String> imageUrls;
+  final double width;
+  final double height;
+
+  const _AnimeCover({
+    required this.imageUrls,
+    required this.width,
+    required this.height,
+  });
+
+  @override
+  State<_AnimeCover> createState() => _AnimeCoverState();
+}
+
+class _AnimeCoverState extends State<_AnimeCover> {
+  var _imageIndex = 0;
+
+  @override
+  void didUpdateWidget(covariant _AnimeCover oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.imageUrls != widget.imageUrls) _imageIndex = 0;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_imageIndex >= widget.imageUrls.length) return _errorCover();
+    return CachedNetworkImage(
+      key: ValueKey(widget.imageUrls[_imageIndex]),
+      imageUrl: widget.imageUrls[_imageIndex],
+      width: widget.width,
+      height: widget.height,
+      fit: BoxFit.cover,
+      memCacheWidth: widget.width.isFinite ? (widget.width * 2).round() : null,
+      placeholder: (_, _) => Container(
+        color: AppColors.surface,
+        child: const Center(
+          child: CircularProgressIndicator(color: AppColors.primary),
+        ),
+      ),
+      errorWidget: (_, _, _) {
+        if (_imageIndex + 1 < widget.imageUrls.length) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) setState(() => _imageIndex++);
+          });
+          return Container(color: AppColors.surface);
+        }
+        return _errorCover();
+      },
+    );
+  }
+
+  Widget _errorCover() => Container(
+    width: widget.width,
+    height: widget.height,
+    color: AppColors.surface,
+    child: const Icon(
+      Icons.image_not_supported_outlined,
+      color: Colors.white54,
+    ),
+  );
 }

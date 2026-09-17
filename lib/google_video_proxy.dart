@@ -4,6 +4,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 class GoogleVideoProxy {
+  static bool simulateLegacyError = false;
+  static bool disableProxy = false;
+
   GoogleVideoProxy({
     required Uri targetUri,
     required Map<String, String> forwardHeaders,
@@ -19,6 +22,10 @@ class GoogleVideoProxy {
   Uri? _localUri;
 
   bool get isRunning => _server != null;
+  Uri? get localUri => _localUri;
+  int? get port => _server?.port;
+  Uri get targetUri => _targetUri;
+  Map<String, String> get forwardHeaders => _forwardHeaders;
 
   Future<Uri> start() async {
     if (_localUri != null && _server != null) {
@@ -27,13 +34,25 @@ class GoogleVideoProxy {
 
     _client = _createHttpClient();
 
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final server = await HttpServer.bind(InternetAddress.anyIPv4, 0);
     _server = server;
+    String pathExtension = '.mp4';
+    final targetStr = _targetUri.toString().toLowerCase();
+    if (targetStr.contains('.m3u8') ||
+        targetStr.contains('akumast.net') ||
+        targetStr.contains('/m.jpg') ||
+        targetStr.contains('/h.jpg') ||
+        targetStr.contains('/p.jpg')) {
+      pathExtension = '.m3u8';
+    } else if (targetStr.contains('.mpd')) {
+      pathExtension = '.mpd';
+    }
+
     _localUri = Uri(
       scheme: 'http',
-      host: server.address.address,
+      host: '127.0.0.1',
       port: server.port,
-      path: '/stream',
+      path: '/stream$pathExtension',
     );
 
     _subscription = server.listen(
@@ -63,7 +82,16 @@ class GoogleVideoProxy {
 
   HttpClient _createHttpClient() {
     final client = HttpClient();
-    final userAgent = _forwardHeaders[HttpHeaders.userAgentHeader];
+    
+    // Find User-Agent case-insensitively
+    String? userAgent;
+    for (final entry in _forwardHeaders.entries) {
+      if (entry.key.toLowerCase() == 'user-agent') {
+        userAgent = entry.value;
+        break;
+      }
+    }
+
     if (userAgent != null && userAgent.isNotEmpty) {
       client.userAgent = userAgent;
     }
@@ -76,57 +104,130 @@ class GoogleVideoProxy {
     final client = _client ?? _createHttpClient();
     _client = client;
 
-    HttpClientRequest upstreamRequest;
-    try {
-      upstreamRequest = await client.openUrl(request.method, _targetUri);
-    } catch (error, stackTrace) {
-      debugPrint('GoogleVideoProxy upstream open error: $error');
-      debugPrint('$stackTrace');
-      return _failRequest(request, HttpStatus.badGateway, 'Proxy open error');
+    final isStreamEndpoint = request.uri.path.startsWith('/stream');
+    Uri currentTargetUri;
+    if (isStreamEndpoint) {
+      currentTargetUri = _targetUri;
+    } else {
+      // Sub-resource request (e.g. HLS sub-playlist or fMP4 segments)
+      // Strip leading '/' so Uri.resolve preserves _targetUri's directory path!
+      final rawPath = request.uri.path;
+      final relPath = rawPath.startsWith('/') ? rawPath.substring(1) : rawPath;
+      currentTargetUri = _targetUri.resolve(relPath);
+      debugPrint('GoogleVideoProxy resolved sub-resource: $rawPath -> $currentTargetUri');
     }
 
-    // Apply persisted headers first.
-    _forwardHeaders.forEach((key, value) {
-      if (_shouldSkipRequestHeader(key)) return;
-      upstreamRequest.headers.set(key, value);
-    });
+    HttpClientResponse? finalResponse;
+    int redirectCount = 0;
+    const maxRedirects = 5;
 
-    // Forward range and other relevant headers from the local request.
-    final forwardedHeaders = <String>[
-      HttpHeaders.rangeHeader,
-      HttpHeaders.acceptHeader,
-      HttpHeaders.acceptLanguageHeader,
-      HttpHeaders.acceptEncodingHeader,
-    ];
-
-    for (final headerName in forwardedHeaders) {
-      final value = request.headers.value(headerName);
-      if (value != null && value.isNotEmpty) {
-        upstreamRequest.headers.set(headerName, value);
+    while (redirectCount < maxRedirects) {
+      HttpClientRequest upstreamRequest;
+      try {
+        upstreamRequest = await client.openUrl(request.method, currentTargetUri);
+        upstreamRequest.followRedirects = simulateLegacyError;
+      } catch (error, stackTrace) {
+        debugPrint('GoogleVideoProxy upstream open error: $error');
+        debugPrint('$stackTrace');
+        return _failRequest(request, HttpStatus.badGateway, 'Proxy open error');
       }
+
+      // Apply persisted headers on every redirect hop
+      _forwardHeaders.forEach((key, value) {
+        if (_shouldSkipRequestHeader(key)) return;
+        upstreamRequest.headers.set(key, value);
+      });
+
+      // Forward range and other relevant headers from the local request.
+      final forwardedHeaders = <String>[
+        HttpHeaders.rangeHeader,
+        HttpHeaders.acceptHeader,
+        HttpHeaders.acceptLanguageHeader,
+        HttpHeaders.acceptEncodingHeader,
+      ];
+
+      for (final headerName in forwardedHeaders) {
+        final value = request.headers.value(headerName);
+        if (value != null && value.isNotEmpty) {
+          upstreamRequest.headers.set(headerName, value);
+        }
+      }
+
+      // Ensure Accept-Encoding is identity if not overridden.
+      if (upstreamRequest.headers.value(HttpHeaders.acceptEncodingHeader) ==
+          null) {
+        final encoding =
+            _forwardHeaders[HttpHeaders.acceptEncodingHeader] ?? 'identity';
+        upstreamRequest.headers.set(HttpHeaders.acceptEncodingHeader, encoding);
+      }
+
+      HttpClientResponse upstreamResponse;
+      try {
+        upstreamResponse = await upstreamRequest.close();
+      } catch (error, stackTrace) {
+        debugPrint('GoogleVideoProxy upstream request error: $error');
+        debugPrint('$stackTrace');
+        return _failRequest(request, HttpStatus.badGateway, 'Proxy fetch error');
+      }
+
+      final isRedirect = upstreamResponse.statusCode == HttpStatus.movedPermanently ||
+          upstreamResponse.statusCode == HttpStatus.found ||
+          upstreamResponse.statusCode == HttpStatus.seeOther ||
+          upstreamResponse.statusCode == HttpStatus.temporaryRedirect ||
+          upstreamResponse.statusCode == HttpStatus.permanentRedirect;
+
+      if (isRedirect) {
+        final location = upstreamResponse.headers.value(HttpHeaders.locationHeader);
+        if (location != null && location.isNotEmpty) {
+          final redirectUri = currentTargetUri.resolve(location);
+          debugPrint('GoogleVideoProxy following redirect ($redirectCount): $currentTargetUri -> $redirectUri');
+          await upstreamResponse.drain();
+          currentTargetUri = redirectUri;
+          redirectCount++;
+          continue;
+        }
+      }
+
+      finalResponse = upstreamResponse;
+      break;
     }
 
-    // Ensure Accept-Encoding is identity if not overridden.
-    if (upstreamRequest.headers.value(HttpHeaders.acceptEncodingHeader) ==
-        null) {
-      final encoding =
-          _forwardHeaders[HttpHeaders.acceptEncodingHeader] ?? 'identity';
-      upstreamRequest.headers.set(HttpHeaders.acceptEncodingHeader, encoding);
+    if (finalResponse == null) {
+      return _failRequest(request, HttpStatus.badGateway, 'Too many redirects');
     }
 
-    HttpClientResponse upstreamResponse;
-    try {
-      upstreamResponse = await upstreamRequest.close();
-    } catch (error, stackTrace) {
-      debugPrint('GoogleVideoProxy upstream request error: $error');
-      debugPrint('$stackTrace');
-      return _failRequest(request, HttpStatus.badGateway, 'Proxy fetch error');
-    }
+    request.response.statusCode = finalResponse.statusCode;
 
-    request.response.statusCode = upstreamResponse.statusCode;
+    final targetLower = _targetUri.toString().toLowerCase();
+    final isHlsManifest = isStreamEndpoint &&
+        (request.uri.path.endsWith('.m3u8') ||
+            currentTargetUri.path.endsWith('.m3u8') ||
+            currentTargetUri.path.endsWith('/m.jpg') ||
+            currentTargetUri.path.endsWith('/h.jpg') ||
+            currentTargetUri.path.endsWith('/p.jpg') ||
+            targetLower.contains('akumast.net'));
 
-    upstreamResponse.headers.forEach((name, values) {
-      if (_shouldSkipResponseHeader(name)) {
+    final isSubPlaylist = !isStreamEndpoint &&
+        (request.uri.path.endsWith('.m3u8') ||
+            request.uri.path.endsWith('/p.jpg') ||
+            currentTargetUri.path.endsWith('/p.jpg'));
+
+    final isHlsSegment = !isStreamEndpoint &&
+        !isSubPlaylist &&
+        (request.uri.path.endsWith('.jpg') ||
+            request.uri.path.endsWith('.ts') ||
+            request.uri.path.endsWith('.m4s'));
+
+    final isDashManifest = isStreamEndpoint &&
+        request.uri.path.endsWith('.mpd') &&
+        !isHlsManifest;
+
+    finalResponse.headers.forEach((name, values) {
+      if (_shouldSkipResponseHeader(
+        name,
+        isHlsManifest: isHlsManifest || isSubPlaylist,
+        isDashManifest: isDashManifest,
+      )) {
         return;
       }
       for (final value in values) {
@@ -134,12 +235,28 @@ class GoogleVideoProxy {
       }
     });
 
+    // Add CORS headers for web/mobile players
+    request.response.headers.set('Access-Control-Allow-Origin', '*');
+    request.response.headers.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    request.response.headers.set('Access-Control-Allow-Headers', '*');
+
+    if (isHlsManifest || isSubPlaylist) {
+      request.response.headers.contentType =
+          ContentType('application', 'vnd.apple.mpegurl');
+    } else if (isDashManifest) {
+      request.response.headers.contentType =
+          ContentType('application', 'dash+xml');
+    } else if (isHlsSegment && targetLower.contains('akumast.net')) {
+      request.response.headers.contentType =
+          ContentType('video', 'mp4');
+    }
+
     try {
       if (request.method == 'HEAD') {
-        await upstreamResponse.drain();
+        await finalResponse.drain();
         await request.response.close();
       } else {
-        await upstreamResponse.pipe(request.response);
+        await finalResponse.pipe(request.response);
       }
     } catch (error, stackTrace) {
       debugPrint('GoogleVideoProxy piping error: $error');
@@ -158,8 +275,15 @@ class GoogleVideoProxy {
         lower == 'accept-encoding';
   }
 
-  bool _shouldSkipResponseHeader(String name) {
+  bool _shouldSkipResponseHeader(
+    String name, {
+    bool isHlsManifest = false,
+    bool isDashManifest = false,
+  }) {
     final lower = name.toLowerCase();
+    if ((isHlsManifest || isDashManifest) && lower == 'content-type') {
+      return true;
+    }
     return lower == 'connection' || lower == 'transfer-encoding';
   }
 

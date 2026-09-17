@@ -461,8 +461,7 @@ class DownloadService extends ChangeNotifier {
           ),
         );
 
-        if (resolvedStream.url.contains('.m3u8') ||
-            resolvedStream.url.contains('master.m3u8')) {
+        if (isHlsStream(resolvedStream.url)) {
           await _downloadHls(id, resolvedStream);
           return;
         }
@@ -481,23 +480,21 @@ class DownloadService extends ChangeNotifier {
         // Step 2: Get the actual video URL
         final videoResult = await AnimeService.extractActualVideoURL(
           videoSrc,
-          referer: 'https://animefire.plus/',
+          referer: 'https://animefire.one/',
           fallbackHeaders: _defaultDownloadHeaders(
-            referer: 'https://animefire.plus/',
+            referer: 'https://animefire.one/',
           ),
         );
         resolvedStream = _ResolvedDownloadStream(
           url: videoResult.url,
           headers: _mergeHeaders(
-            _defaultDownloadHeaders(referer: 'https://animefire.plus/'),
+            _defaultDownloadHeaders(referer: 'https://animefire.one/'),
             videoResult.headers,
           ),
         );
         debugPrint('[Download] Resolved video URL: ${resolvedStream.url}');
 
-        // Final check for HLS
-        if (resolvedStream.url.contains('.m3u8') ||
-            resolvedStream.url.contains('master.m3u8')) {
+        if (isHlsStream(resolvedStream.url)) {
           await _downloadHls(id, resolvedStream);
           return;
         }
@@ -970,7 +967,13 @@ class DownloadService extends ChangeNotifier {
     );
   }
 
-  Map<String, String> _defaultDownloadHeaders({String? referer}) {
+  Map<String, String> _defaultDownloadHeaders({String? referer, String? url}) {
+    final ref = (referer != null && referer.isNotEmpty)
+        ? referer
+        : ((url != null && (url.contains('lightspeedst.net') || url.contains('animefire')))
+            ? 'https://animefire.one/'
+            : 'https://animefire.one/');
+
     return {
       HttpHeaders.userAgentHeader:
           'Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 '
@@ -978,9 +981,75 @@ class DownloadService extends ChangeNotifier {
       HttpHeaders.acceptHeader: 'video/mp4,video/*;q=0.9,*/*;q=0.8',
       HttpHeaders.acceptLanguageHeader: 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
       HttpHeaders.acceptEncodingHeader: 'identity',
-      if (referer != null && referer.isNotEmpty)
-        HttpHeaders.refererHeader: referer,
+      HttpHeaders.refererHeader: ref,
     };
+  }
+
+  /// Checks if a stream URL is an HLS playlist (.m3u8, akumast disguised jpg, etc.)
+  static bool isHlsStream(String url) {
+    final lower = url.toLowerCase();
+    return lower.contains('.m3u8') ||
+        lower.contains('master.m3u8') ||
+        lower.contains('akumast.net') ||
+        lower.contains('/m.jpg') ||
+        lower.contains('/h.jpg') ||
+        lower.contains('/p.jpg');
+  }
+
+  /// Generates an optimized yt-dlp CLI command string to download the anime stream
+  static String generateYtDlpCommand({
+    required String videoUrl,
+    String? referer,
+    String? outputName,
+  }) {
+    String ref = referer ?? '';
+    final isAnimeFireOrAkumast = videoUrl.contains('akumast.net') ||
+        videoUrl.contains('animefire') ||
+        videoUrl.contains('lightspeedst.net');
+
+    if (ref.isEmpty ||
+        ref.contains('127.0.0.1') ||
+        ref.contains('localhost') ||
+        (isAnimeFireOrAkumast &&
+            (ref.contains('akumast.net') || ref.contains('api.animefire.io')))) {
+      if (isAnimeFireOrAkumast) {
+        ref = 'https://animefire.one/';
+      } else if (videoUrl.contains('allanime')) {
+        ref = 'https://allanime.day/';
+      } else if (videoUrl.contains('gogoanime') ||
+          videoUrl.contains('hianime')) {
+        ref = 'https://hianime.to/';
+      } else if (videoUrl.contains('blogspot') ||
+          videoUrl.contains('blogger')) {
+        ref = 'https://www.blogger.com/';
+      } else {
+        try {
+          final uri = Uri.parse(videoUrl);
+          ref = '${uri.scheme}://${uri.host}/';
+        } catch (_) {
+          ref = 'https://animefire.one/';
+        }
+      }
+    }
+
+    String outOpt = '';
+    if (outputName != null && outputName.isNotEmpty) {
+      final safeName = outputName
+          .replaceAll(RegExp(r'[<>:"/\\|?*]'), '_')
+          .replaceAll(RegExp(r'\s+'), '_')
+          .trim();
+      outOpt = '-o "$safeName.%(ext)s"';
+    }
+
+    String extraHeaders = '';
+    if (isAnimeFireOrAkumast) {
+      extraHeaders = ' --add-header "Origin: https://animefire.one"';
+    }
+
+    const userAgent =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+    return 'yt-dlp --referer "$ref"$extraHeaders --user-agent "$userAgent" --no-check-certificates --concurrent-fragments 4 --no-mtime $outOpt "$videoUrl"';
   }
 
   Map<String, String> _mergeHeaders(

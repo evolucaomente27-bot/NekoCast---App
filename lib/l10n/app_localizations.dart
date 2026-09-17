@@ -203,6 +203,39 @@ class AppLocalizations {
   String get languageChanged => locale.languageCode == 'pt'
       ? 'Idioma alterado com sucesso'
       : 'Language changed successfully';
+  String get videoPlayer =>
+      locale.languageCode == 'pt' ? 'Reprodutor de Vídeo' : 'Video Player';
+  String get selectPlayerEngine => locale.languageCode == 'pt'
+      ? 'Selecione o motor de reprodução'
+      : 'Select playback engine';
+  String get playerEngineChanged => locale.languageCode == 'pt'
+      ? 'Reprodutor alterado com sucesso'
+      : 'Video player changed successfully';
+  String get keyboardShortcuts => locale.languageCode == 'pt'
+      ? 'Atalhos de Teclado (PC)'
+      : 'Keyboard Shortcuts (PC)';
+  String get switchPlayer =>
+      locale.languageCode == 'pt' ? 'Trocar Reprodutor' : 'Switch Player';
+  String get dohSecurity =>
+      locale.languageCode == 'pt' ? 'Segurança & DoH (DNS Criptografado)' : 'Security & DoH (Encrypted DNS)';
+  String get dohDescription => locale.languageCode == 'pt'
+      ? 'Encaminha o tráfego HTTPS por DNS-over-HTTPS (NextDNS, Cloudflare, Google) protegendo contra bloqueios e monitoramento de rede.'
+      : 'Routes HTTPS traffic through DNS-over-HTTPS (NextDNS, Cloudflare, Google) preventing ISP blocking and tracking.';
+  String get enableDoh =>
+      locale.languageCode == 'pt' ? 'Ativar DNS-over-HTTPS' : 'Enable DNS-over-HTTPS';
+  String get dohProvider =>
+      locale.languageCode == 'pt' ? 'Provedor DoH' : 'DoH Provider';
+  String get nextDnsProfile =>
+      locale.languageCode == 'pt' ? 'ID do Perfil NextDNS' : 'NextDNS Profile ID';
+  String get nextDnsProfileHint => locale.languageCode == 'pt'
+      ? 'Ex: a1b2c3 (opcional, deixe em branco para usar o padrão)'
+      : 'E.g., a1b2c3 (optional, leave blank for default)';
+  String get customDohUrl =>
+      locale.languageCode == 'pt' ? 'URL do DoH Customizado' : 'Custom DoH URL';
+  String get testDohConnection =>
+      locale.languageCode == 'pt' ? 'Testar Conexão DoH' : 'Test DoH Connection';
+  String get dohTesting =>
+      locale.languageCode == 'pt' ? 'Testando conexão...' : 'Testing connection...';
 }
 
 class _AppLocalizationsDelegate

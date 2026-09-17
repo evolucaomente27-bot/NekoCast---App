@@ -2,6 +2,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import '../theme/app_colors.dart';
+import 'tv_focusable.dart';
 
 class SkipButton extends StatefulWidget {
   final VoidCallback onSkip;
@@ -78,17 +79,17 @@ class _SkipButtonState extends State<SkipButton>
         child: Semantics(
           button: true,
           label: widget.label,
-          child: ClipRRect(
+          child: TvFocusable(
+            onPressed: widget.onSkip,
+            focusScale: 1.08,
             borderRadius: BorderRadius.circular(12),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: widget.onSkip,
-                  borderRadius: BorderRadius.circular(12),
-                  splashColor: AppColors.primary.withValues(alpha: 0.2),
-                  highlightColor: AppColors.primary.withValues(alpha: 0.15),
+            showFocusBorder: true,
+            showFocusGlow: true,
+            builder: (context, hasFocus, isHovered) {
+              return ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 200),
                     curve: Curves.easeOut,
@@ -101,16 +102,20 @@ class _SkipButtonState extends State<SkipButton>
                       vertical: 10,
                     ),
                     decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.35),
+                      color: hasFocus
+                          ? AppColors.primary.withValues(alpha: 0.5)
+                          : Colors.black.withValues(alpha: 0.35),
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(
-                        color: Colors.white.withValues(alpha: 0.12),
-                        width: 1,
+                        color: hasFocus ? AppColors.primaryLight : Colors.white.withValues(alpha: 0.12),
+                        width: hasFocus ? 2 : 1,
                       ),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.35),
-                          blurRadius: 12,
+                          color: hasFocus
+                              ? AppColors.primary.withValues(alpha: 0.5)
+                              : Colors.black.withValues(alpha: 0.35),
+                          blurRadius: hasFocus ? 18 : 12,
                           offset: const Offset(0, 6),
                         ),
                       ],
@@ -134,8 +139,8 @@ class _SkipButtonState extends State<SkipButton>
                         const SizedBox(width: 10),
                         Text(
                           widget.label,
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.92),
+                          style: const TextStyle(
+                            color: Colors.white,
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
                             letterSpacing: 0.2,
@@ -145,8 +150,8 @@ class _SkipButtonState extends State<SkipButton>
                     ),
                   ),
                 ),
-              ),
-            ),
+              );
+            },
           ),
         ),
       ),

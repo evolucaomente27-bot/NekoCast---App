@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../main.dart';
-import '../l10n/app_localizations.dart';
 import '../theme/app_colors.dart';
-import '../services/allanime_service.dart';
-import '../widgets/watchlist_button.dart';
+import '../widgets/tv_focusable.dart';
+import '../services/player_service.dart';
 import 'episode_list_screen.dart';
 
+/// Direct AnimeFire Source and Version Selection Screen
 class SourceSelectionScreen extends StatefulWidget {
   final String animeTitle;
   final String imageUrl;
@@ -23,32 +23,22 @@ class SourceSelectionScreen extends StatefulWidget {
   State<SourceSelectionScreen> createState() => _SourceSelectionScreenState();
 }
 
-class _SourceSelectionScreenState extends State<SourceSelectionScreen>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _animationController;
-
-  bool _isSearchingAllAnime = false;
-  bool _isSearchingAnimeFire = false;
-  List<AllAnimeShow> _allAnimeResults = [];
-  String? _allAnimeErrorMessage;
+class _SourceSelectionScreenState extends State<SourceSelectionScreen> {
+  bool _isSearching = true;
+  String? _errorMessage;
   List<Anime> _animeFireResults = [];
-  String? _animeFireErrorMessage;
+  final TextEditingController _customSearchController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 300),
-    );
-    _animationController.forward();
-    _searchAllAnime();
-    _searchAnimeFire();
+    _customSearchController.text = widget.animeTitle;
+    _searchAnimeFire(widget.animeTitle);
   }
 
   @override
   void dispose() {
-    _animationController.dispose();
+    _customSearchController.dispose();
     super.dispose();
   }
 
@@ -65,37 +55,24 @@ class _SourceSelectionScreenState extends State<SourceSelectionScreen>
 
     addQuery(title);
 
-    final cleaned = title
-        .replaceAll(
-          RegExp(
-            r'\s*\([^)]*\)|\s*\[[^\]]*\]|(?:dublado|legendado|dub|sub)',
-            caseSensitive: false,
-          ),
-          ' ',
-        )
-        .replaceAll(
-          RegExp(
-            r'\b\d+(?:st|nd|rd|th)\s+season\b|\bseason\s+\d+\b|\btemporada\s+\d+\b',
-            caseSensitive: false,
-          ),
-          ' ',
-        )
-        .replaceAll(
-          RegExp(r'\bpart\s+\d+\b|\bcour\s+\d+\b', caseSensitive: false),
-          ' ',
-        )
+    final noSpaces = title.replaceAll(' ', '');
+    addQuery(noSpaces);
+
+    final hyphenated = title.replaceAll(RegExp(r'\s+'), '-');
+    addQuery(hyphenated);
+
+    final noSymbols = title
+        .replaceAll(RegExp(r'[^\w\s]'), '')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
+    addQuery(noSymbols);
 
-    addQuery(cleaned);
-    addQuery(cleaned.replaceAll(':', ' '));
-
-    final shortened = cleaned
-        .replaceAll(RegExp(r'\s+-\s+.*$'), '')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-    addQuery(shortened);
-    addQuery(shortened.replaceAll(':', ' '));
+    // First two words
+    final words = noSymbols.split(' ').where((w) => w.length > 1).toList();
+    if (words.length >= 2) {
+      addQuery(words.take(2).join(' '));
+      addQuery(words.take(2).join(''));
+    }
 
     return queries;
   }
@@ -114,10 +91,8 @@ class _SourceSelectionScreenState extends State<SourceSelectionScreen>
       return 600;
     }
 
-    final queryTokens = normalizedQuery
-        .split(' ')
-        .where((e) => e.isNotEmpty)
-        .toSet();
+    final queryTokens =
+        normalizedQuery.split(' ').where((e) => e.isNotEmpty).toSet();
     var overlap = 0;
     for (final token in normalizedCandidate.split(' ')) {
       if (queryTokens.contains(token)) {
@@ -129,566 +104,357 @@ class _SourceSelectionScreenState extends State<SourceSelectionScreen>
         (normalizedCandidate.length - normalizedQuery.length).abs();
   }
 
-  Future<void> _searchAllAnime() async {
+  Future<void> _searchAnimeFire(String searchTitle) async {
     setState(() {
-      _isSearchingAllAnime = true;
-      _allAnimeErrorMessage = null;
+      _isSearching = true;
+      _errorMessage = null;
+      _animeFireResults = [];
     });
 
     try {
-      final queries = _buildSearchQueries(widget.animeTitle);
-      final showMap = <String, AllAnimeShow>{};
+      final queries = _buildSearchQueries(searchTitle);
+      final animeMap = <String, Anime>{};
 
       for (final query in queries) {
-        final searchResponse = await AllAnimeService.searchAnime(query);
-        final shows = searchResponse?.shows ?? const <AllAnimeShow>[];
-        for (final show in shows) {
-          showMap.putIfAbsent(show.id, () => show);
+        final results = await AnimeService.searchAnimeFireOnly(query);
+        for (final anime in results) {
+          animeMap.putIfAbsent(anime.url, () => anime);
         }
 
-        if (showMap.length >= 5) {
+        if (animeMap.length >= 6) {
           break;
         }
       }
 
-      final results = showMap.values.toList()
-        ..sort(
-          (a, b) => _scoreTextMatch(
-            b.displayName,
-            widget.animeTitle,
-          ).compareTo(_scoreTextMatch(a.displayName, widget.animeTitle)),
-        );
+      if (!mounted) return;
+      final playerService =
+          Provider.of<PlayerService>(context, listen: false);
+      final preferDub = playerService.isDubbedPreferred;
+
+      final results = animeMap.values.toList()
+        ..sort((a, b) {
+          final scoreB = _scoreTextMatch(b.name, searchTitle);
+          final scoreA = _scoreTextMatch(a.name, searchTitle);
+          // If scores are relatively close, prefer user audio preference
+          if ((scoreA - scoreB).abs() <= 200) {
+            if (preferDub && a.isDubbed != b.isDubbed) {
+              return a.isDubbed ? -1 : 1;
+            } else if (!preferDub && a.isDubbed != b.isDubbed) {
+              return a.isDubbed ? 1 : -1;
+            }
+          }
+          return scoreB.compareTo(scoreA);
+        });
+
+      if (!mounted) return;
 
       if (results.isNotEmpty) {
+        // If exact single match, directly navigate!
+        if (results.length == 1) {
+          final singleMatch = results.first;
+          await AnimeService.enrichAnimeWithAniList(singleMatch);
+          if (!mounted) return;
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (context) => ModernEpisodeListScreen(anime: singleMatch),
+            ),
+          );
+          return;
+        }
+
         setState(() {
-          _allAnimeResults = results;
-          _isSearchingAllAnime = false;
+          _animeFireResults = results;
+          _isSearching = false;
         });
       } else {
-        if (!mounted) return;
-        final l10n = AppLocalizations.of(context);
         setState(() {
-          _isSearchingAllAnime = false;
-          _allAnimeErrorMessage = l10n.animeNotFoundOnAllAnime;
-        });
-      }
-    } catch (e) {
-      debugPrint('Error searching AllAnime: $e');
-      setState(() {
-        _isSearchingAllAnime = false;
-        _allAnimeErrorMessage = 'Error searching on AllAnime';
-      });
-    }
-  }
-
-  Future<void> _searchAnimeFire() async {
-    setState(() {
-      _isSearchingAnimeFire = true;
-      _animeFireErrorMessage = null;
-    });
-
-    try {
-      final animeFireResults = await AnimeService.searchAnimeFireOnly(
-        widget.animeTitle,
-      );
-
-      if (animeFireResults.isNotEmpty) {
-        setState(() {
-          _animeFireResults = animeFireResults;
-          _isSearchingAnimeFire = false;
-        });
-      } else {
-        if (!mounted) return;
-        final l10n = AppLocalizations.of(context);
-        setState(() {
-          _isSearchingAnimeFire = false;
-          _animeFireErrorMessage = l10n.animeNotFoundOnAnimeFire;
+          _isSearching = false;
+          _errorMessage = 'Nenhum resultado encontrado no AnimeFire';
         });
       }
     } catch (e) {
       debugPrint('Error searching AnimeFire: $e');
+      if (!mounted) return;
       setState(() {
-        _isSearchingAnimeFire = false;
-        _animeFireErrorMessage = 'Error searching on AnimeFire';
+        _isSearching = false;
+        _errorMessage = 'Erro ao buscar no AnimeFire';
       });
     }
   }
 
-  Future<void> _selectSource(AnimeSource source) async {
-    if (source == AnimeSource.allAnime && _allAnimeResults.isNotEmpty) {
-      // Se houver múltiplos resultados, mostra dialog para escolher
-      if (_allAnimeResults.length > 1) {
-        final selectedShow = await _showVersionSelectionDialog(
-          source: source,
-          allAnimeShows: _allAnimeResults,
-        );
-        if (selectedShow == null) return; // User cancelled
-
-        final anime = Anime(
-          name: selectedShow.displayName,
-          url: widget.myAnimeListUrl,
-          fallbackImageUrl: widget.imageUrl,
-          source: AnimeSource.allAnime,
-          allAnimeId: selectedShow.id,
-        );
-
-        // Enrich with AniList data before navigating
-        await AnimeService.enrichAnimeWithAniList(anime);
-
-        if (!mounted) return;
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => ModernEpisodeListScreen(anime: anime),
-          ),
-        );
-      } else {
-        // Apenas um resultado, usa diretamente
-        final show = _allAnimeResults.first;
-        final anime = Anime(
-          name: show.displayName,
-          url: widget.myAnimeListUrl,
-          fallbackImageUrl: widget.imageUrl,
-          source: AnimeSource.allAnime,
-          allAnimeId: show.id,
-        );
-
-        // Enrich with AniList data before navigating
-        await AnimeService.enrichAnimeWithAniList(anime);
-
-        if (!mounted) return;
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => ModernEpisodeListScreen(anime: anime),
-          ),
-        );
-      }
-    } else if (source == AnimeSource.animeFire &&
-        _animeFireResults.isNotEmpty) {
-      // Se houver múltiplos resultados, mostra dialog para escolher
-      if (_animeFireResults.length > 1) {
-        final selectedAnime = await _showVersionSelectionDialog(
-          source: source,
-          animeFireAnimes: _animeFireResults,
-        );
-        if (selectedAnime == null) return; // User cancelled
-
-        // Enrich with AniList data before navigating
-        await AnimeService.enrichAnimeWithAniList(selectedAnime);
-
-        if (!mounted) return;
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => ModernEpisodeListScreen(anime: selectedAnime),
-          ),
-        );
-      } else {
-        // Apenas um resultado, usa diretamente
-        final anime = _animeFireResults.first;
-
-        // Enrich with AniList data before navigating
-        await AnimeService.enrichAnimeWithAniList(anime);
-
-        if (!mounted) return;
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => ModernEpisodeListScreen(anime: anime),
-          ),
-        );
-      }
-    } else {
-      // Fallback (não deveria acontecer)
-      final anime = Anime(
-        name: widget.animeTitle,
-        url: widget.myAnimeListUrl,
-        fallbackImageUrl: widget.imageUrl,
-        source: source,
-      );
-
-      // Enrich with AniList data before navigating
-      await AnimeService.enrichAnimeWithAniList(anime);
-
-      if (!mounted) return;
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (context) => ModernEpisodeListScreen(anime: anime),
-        ),
-      );
-    }
-  }
-
-  Future<dynamic> _showVersionSelectionDialog({
-    required AnimeSource source,
-    List<AllAnimeShow>? allAnimeShows,
-    List<Anime>? animeFireAnimes,
-  }) async {
-    final l10n = AppLocalizations.of(context);
-
-    return showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          backgroundColor: AppColors.backgroundLight,
-          title: Text(
-            l10n.locale.languageCode == 'pt'
-                ? 'Selecione a versão'
-                : 'Select Version',
-            style: const TextStyle(color: Colors.white),
-          ),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: source == AnimeSource.allAnime
-                  ? (allAnimeShows?.length ?? 0)
-                  : (animeFireAnimes?.length ?? 0),
-              itemBuilder: (context, index) {
-                if (source == AnimeSource.allAnime && allAnimeShows != null) {
-                  final show = allAnimeShows[index];
-                  return ListTile(
-                    title: Text(
-                      show.displayName,
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                    subtitle: Text(
-                      '${show.episodeCount} episodes',
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.7),
-                      ),
-                    ),
-                    trailing: const Icon(
-                      Icons.arrow_forward_ios,
-                      color: AppColors.primary,
-                    ),
-                    onTap: () => Navigator.pop(context, show),
-                  );
-                } else if (source == AnimeSource.animeFire &&
-                    animeFireAnimes != null) {
-                  final anime = animeFireAnimes[index];
-                  return ListTile(
-                    title: Text(
-                      anime.name,
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                    trailing: const Icon(
-                      Icons.arrow_forward_ios,
-                      color: AppColors.primary,
-                    ),
-                    onTap: () => Navigator.pop(context, anime),
-                  );
-                }
-                return const SizedBox.shrink();
-              },
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text(
-                l10n.locale.languageCode == 'pt' ? 'Cancelar' : 'Cancel',
-                style: const TextStyle(color: AppColors.primary),
-              ),
-            ),
-          ],
-        );
-      },
+  Future<void> _openAnime(Anime anime) async {
+    await AnimeService.enrichAnimeWithAniList(anime);
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ModernEpisodeListScreen(anime: anime),
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-
     return Scaffold(
       backgroundColor: AppColors.background,
-      body: CustomScrollView(
-        slivers: [
-          // AppBar com imagem do anime
-          SliverAppBar(
-            expandedHeight: 300,
-            floating: false,
-            pinned: true,
-            backgroundColor: AppColors.background,
-            flexibleSpace: FlexibleSpaceBar(
-              title: Text(
-                l10n.selectVersion,
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  shadows: [
-                    Shadow(
-                      offset: Offset(0, 2),
-                      blurRadius: 8,
-                      color: Colors.black87,
-                    ),
-                  ],
-                ),
-              ),
-              background: Stack(
-                fit: StackFit.expand,
-                children: [
-                  CachedNetworkImage(
-                    imageUrl: widget.imageUrl,
-                    fit: BoxFit.cover,
-                    placeholder: (context, url) =>
-                        Container(color: AppColors.surface),
-                    errorWidget: (context, url, error) => Container(
-                      color: AppColors.surface,
-                      child: const Icon(Icons.error, color: Colors.white54),
-                    ),
-                  ),
-                  Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.transparent,
-                          AppColors.background.withValues(alpha: 0.8),
-                          AppColors.background,
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+      appBar: AppBar(
+        backgroundColor: AppColors.background,
+        elevation: 0,
+        title: Text(
+          widget.animeTitle,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
           ),
-
-          // Conteúdo
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.all(24.0),
+        ),
+        iconTheme: const IconThemeData(color: Colors.white),
+      ),
+      body: _isSearching
+          ? Center(
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // Título do anime com botão de watchlist
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Expanded(
-                        child: Text(
-                          widget.animeTitle,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 24,
-                            fontWeight: FontWeight.bold,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      WatchlistButton(
-                        animeId: widget.myAnimeListUrl,
-                        title: widget.animeTitle,
-                        coverImage: widget.imageUrl,
-                        myAnimeListUrl: widget.myAnimeListUrl,
-                      ),
-                    ],
+                  const CircularProgressIndicator(color: AppColors.primary),
+                  const SizedBox(height: 20),
+                  Text(
+                    'Carregando AnimeFire...',
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    l10n.selectVersion,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.7),
-                      fontSize: 16,
-                    ),
+                    widget.animeTitle,
+                    style: const TextStyle(color: Colors.white38, fontSize: 13),
                     textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 32),
-
-                  // Opção AllAnime
-                  _buildSourceCard(
-                    title: 'AllAnime',
-                    subtitle: _isSearchingAllAnime
-                        ? l10n.searching
-                        : _allAnimeResults.isNotEmpty
-                        ? _allAnimeResults.length > 1
-                              ? 'Available • ${_allAnimeResults.length} versions found'
-                              : 'Available • Subtitled'
-                        : _allAnimeErrorMessage ?? 'Unavailable',
-                    icon: Icons.public,
-                    gradient: const LinearGradient(
-                      colors: [Color(0xFF667EEA), Color(0xFF764BA2)],
-                    ),
-                    available: _allAnimeResults.isNotEmpty,
-                    isLoading: _isSearchingAllAnime,
-                    onTap: _allAnimeResults.isNotEmpty
-                        ? () => _selectSource(AnimeSource.allAnime)
-                        : null,
-                  ),
-
-                  const SizedBox(height: 16),
-
-                  // Opção AnimeFire
-                  _buildSourceCard(
-                    title: 'AnimeFire',
-                    subtitle: _isSearchingAnimeFire
-                        ? l10n.searching
-                        : _animeFireResults.isNotEmpty
-                        ? _animeFireResults.length > 1
-                              ? 'Available • ${_animeFireResults.length} versions found'
-                              : 'Available • Dubbed/Subtitled'
-                        : _animeFireErrorMessage ?? 'Unavailable',
-                    icon: Icons.local_fire_department,
-                    gradient: const LinearGradient(
-                      colors: [Color(0xFFFF6B35), Color(0xFFFF8E53)],
-                    ),
-                    available: _animeFireResults.isNotEmpty,
-                    isLoading: _isSearchingAnimeFire,
-                    onTap: _animeFireResults.isNotEmpty
-                        ? () => _selectSource(AnimeSource.animeFire)
-                        : null,
-                  ),
-
-                  const SizedBox(height: 32),
-
-                  // Info adicional
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.05),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: AppColors.primary.withValues(alpha: 0.3),
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.info_outline,
-                          color: AppColors.primary,
-                          size: 20,
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            l10n.locale.languageCode == 'pt'
-                                ? 'Cada fonte pode ter episódios diferentes disponíveis'
-                                : 'Each source may have different episodes available',
-                            style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.7),
-                              fontSize: 13,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
                   ),
                 ],
               ),
+            )
+          : _errorMessage != null && _animeFireResults.isEmpty
+              ? _buildNotFoundView()
+              : _buildResultsList(),
+    );
+  }
+
+  Widget _buildNotFoundView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.red.withValues(alpha: 0.15),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.search_off, color: Colors.redAccent, size: 54),
             ),
-          ),
-        ],
+            const SizedBox(height: 20),
+            const Text(
+              'Anime não encontrado no AnimeFire',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Tente buscar por outro termo ou nome alternativo:',
+              style: TextStyle(color: Colors.white.withValues(alpha: 0.6), fontSize: 13),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 20),
+            TextField(
+              controller: _customSearchController,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                hintText: 'Digite o nome do anime...',
+                hintStyle: const TextStyle(color: Colors.white38),
+                filled: true,
+                fillColor: AppColors.surface,
+                prefixIcon: const Icon(Icons.search, color: AppColors.primary),
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.send, color: AppColors.primary),
+                  onPressed: () => _searchAnimeFire(_customSearchController.text),
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+              onSubmitted: (val) => _searchAnimeFire(val),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: () => _searchAnimeFire(_customSearchController.text),
+              icon: const Icon(Icons.refresh),
+              label: const Text('Tentar Novamente'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _buildSourceCard({
-    required String title,
-    required String subtitle,
-    required IconData icon,
-    required Gradient gradient,
-    required bool available,
-    required bool isLoading,
-    required VoidCallback? onTap,
-  }) {
-    return GestureDetector(
-      onTap: available && !isLoading ? onTap : null,
-      child: Container(
-        decoration: BoxDecoration(
-          gradient: available && !isLoading
-              ? gradient
-              : LinearGradient(
-                  colors: [Colors.grey.shade800, Colors.grey.shade700],
+  Widget _buildResultsList() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        // Header
+        Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFF6B35).withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: const Color(0xFFFF6B35), width: 0.8),
+              ),
+              child: const Text(
+                'AnimeFire Direto',
+                style: TextStyle(
+                  color: Color(0xFFFF6B35),
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
                 ),
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: available && !isLoading
-              ? [
-                  BoxShadow(
-                    color: gradient.colors.first.withValues(alpha: 0.3),
-                    blurRadius: 12,
-                    offset: const Offset(0, 6),
-                  ),
-                ]
-              : null,
-        ),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(20),
-            onTap: available && !isLoading ? onTap : null,
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: Row(
-                children: [
-                  // Ícone
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Icon(icon, color: Colors.white, size: 32),
-                  ),
-                  const SizedBox(width: 16),
-
-                  // Textos
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          title,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          subtitle,
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.8),
-                            fontSize: 14,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  // Indicador
-                  if (isLoading)
-                    const SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation(Colors.white),
-                      ),
-                    )
-                  else if (available)
-                    const Icon(
-                      Icons.arrow_forward_ios,
-                      color: Colors.white,
-                      size: 20,
-                    )
-                  else
-                    Icon(
-                      Icons.block,
-                      color: Colors.white.withValues(alpha: 0.5),
-                      size: 20,
-                    ),
-                ],
               ),
             ),
-          ),
+            const SizedBox(width: 10),
+            Text(
+              '${_animeFireResults.length} versões encontradas',
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
+            ),
+          ],
         ),
-      ),
+        const SizedBox(height: 16),
+
+        // Results
+        ..._animeFireResults.map((anime) {
+          final isDubbed = anime.isDubbed;
+
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: TvFocusable(
+              onPressed: () => _openAnime(anime),
+              focusScale: 1.03,
+              borderRadius: BorderRadius.circular(14),
+              showFocusBorder: true,
+              showFocusGlow: true,
+              builder: (context, hasFocus, isHovered) {
+                return Container(
+                  decoration: BoxDecoration(
+                    color: hasFocus
+                        ? AppColors.primary.withValues(alpha: 0.18)
+                        : AppColors.surface,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: hasFocus
+                          ? AppColors.primary
+                          : Colors.white.withValues(alpha: 0.08),
+                    ),
+                  ),
+                  child: ListTile(
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    leading: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: SizedBox(
+                        width: 50,
+                        height: 65,
+                        child: anime.imageUrl.isNotEmpty
+                            ? CachedNetworkImage(
+                                imageUrl: anime.imageUrl,
+                                fit: BoxFit.cover,
+                                errorWidget: (_, _, _) => const Icon(
+                                  Icons.movie,
+                                  color: Colors.white24,
+                                ),
+                              )
+                            : (widget.imageUrl.isNotEmpty
+                                ? CachedNetworkImage(
+                                    imageUrl: widget.imageUrl,
+                                    fit: BoxFit.cover,
+                                    errorWidget: (_, _, _) => const Icon(
+                                      Icons.movie,
+                                      color: Colors.white24,
+                                    ),
+                                  )
+                                : const Icon(Icons.movie, color: Colors.white24)),
+                      ),
+                    ),
+                    title: Text(
+                      anime.name,
+                      style: TextStyle(
+                        color: hasFocus ? AppColors.primaryLight : Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                      ),
+                    ),
+                    subtitle: Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: isDubbed
+                                  ? const Color(0xFF2E7D32).withValues(alpha: 0.25)
+                                  : Colors.blue.withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(
+                                color: isDubbed
+                                    ? const Color(0xFF4CAF50)
+                                    : Colors.blue,
+                                width: 0.8,
+                              ),
+                            ),
+                            child: Text(
+                              isDubbed ? '🇧🇷 Dublado' : '🇯🇵 Legendado',
+                              style: TextStyle(
+                                color: isDubbed
+                                    ? const Color(0xFF81C784)
+                                    : Colors.lightBlueAccent,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'AnimeFire',
+                            style: TextStyle(color: Colors.white38, fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                    trailing: Icon(
+                      Icons.play_circle_fill,
+                      color: hasFocus ? AppColors.primaryLight : AppColors.primary,
+                      size: 32,
+                    ),
+                  ),
+                );
+              },
+            ),
+          );
+        }),
+      ],
     );
   }
 }
